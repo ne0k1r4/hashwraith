@@ -12,6 +12,33 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+
+# ─── Terminal colors (plain ANSI, no external deps) ────────────────────
+class C:
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+
+def info(msg):
+    print(f"{C.CYAN}[*]{C.RESET} {msg}")
+
+
+def ok(msg):
+    print(f"{C.GREEN}{C.BOLD}[✓]{C.RESET} {msg}")
+
+
+def warn(msg):
+    print(f"{C.YELLOW}[!]{C.RESET} {msg}")
+
+
+def err(msg):
+    print(f"{C.RED}[✗]{C.RESET} {msg}")
+
+
 HASH_PATTERNS = [
     (r"^\$2[aby]\$\d{2}\$.{53}$", (3200, "bcrypt", None)),
     (r"^\$6\$.{0,16}\$.{86}$", (1800, "sha512crypt", None)),
@@ -86,7 +113,7 @@ def check_gpu():
                 devices.append(line.split(":", 1)[1].strip())
         return devices
     except FileNotFoundError:
-        print("[!] hashcat not found. Install it: sudo pacman -S hashcat")
+        warn("hashcat not found. Install it: sudo pacman -S hashcat")
         sys.exit(1)
 
 
@@ -153,12 +180,12 @@ def check_path_exists(path_str, label):
         return True
     p = Path(path_str)
     if not p.exists():
-        print(f"[!] {label} not found: {path_str}")
+        warn(f"{label} not found: {path_str}")
         if p.is_symlink():
             print(f"    This is a broken symlink — target may not be mounted/available.")
         return False
     if not p.is_file():
-        print(f"[!] {label} is not a regular file: {path_str}")
+        warn(f"{label} is not a regular file: {path_str}")
         return False
     return True
 
@@ -198,13 +225,13 @@ def crack_single_hash(hash_value, mode, wordlist, rule, session_prefix, cfg, use
 
     priority_path = cfg.get("priority_wordlist")
     if use_priority and priority_path and Path(priority_path).exists():
-        print(f"[*] Trying priority list first ({priority_path})...")
+        info(f"Trying priority list first ({priority_path})...")
         plain = run_hashcat(hash_file, mode, priority_path, None, f"{session_prefix}_priority")
         if plain:
             return plain
-        print("[*] Not in priority list, falling back to full wordlist...")
+        info("Not in priority list, falling back to full wordlist...")
     elif use_priority:
-        print("[*] No priority list configured/found, skipping straight to full wordlist.")
+        info("No priority list configured/found, skipping straight to full wordlist.")
 
     return run_hashcat(hash_file, mode, wordlist, rule, session_prefix)
 
@@ -230,7 +257,7 @@ def cmd_crack(args):
         candidates = detect_hash_type(hash_value)
         if len(candidates) == 1:
             mode, name = candidates[0]
-            print(f"[*] Detected hash type: {name} (hashcat mode {mode})")
+            info(f"Detected hash type: {name} (hashcat mode {mode})")
         elif candidates:
             labels = [f"{n} (mode {m})" for m, n in candidates]
             choice = prompt_choice("Select the correct hash type:", labels, allow_none=False)
@@ -257,7 +284,7 @@ def cmd_batch(args):
     cfg = load_config()
     hashes = Path(args.file).read_text().splitlines()
     hashes = [h.strip() for h in hashes if h.strip()]
-    print(f"[*] Loaded {len(hashes)} hashes from {args.file}")
+    info(f"Loaded {len(hashes)} hashes from {args.file}")
 
     wordlist = args.wordlist or cfg.get("default_wordlist") or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
     rule = args.rule or cfg.get("default_rule")
@@ -275,7 +302,7 @@ def cmd_batch(args):
 
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(results, indent=2))
-        print(f"\n[*] Results exported to {args.json_out}")
+        info(f"\nResults exported to {args.json_out}")
 
 
 def cmd_benchmark(args):
@@ -320,18 +347,18 @@ def cmd_config(args):
     elif args.action == "set-wordlist":
         cfg["default_wordlist"] = args.value
         save_config(cfg)
-        print(f"[✓] Default wordlist set to: {args.value}")
+        ok(f"Default wordlist set to: {args.value}")
     elif args.action == "set-rule":
         cfg["default_rule"] = args.value
         save_config(cfg)
-        print(f"[✓] Default rule set to: {args.value}")
+        ok(f"Default rule set to: {args.value}")
     elif args.action == "set-priority":
         cfg["priority_wordlist"] = args.value
         save_config(cfg)
-        print(f"[✓] Priority wordlist set to: {args.value}")
+        ok(f"Priority wordlist set to: {args.value}")
     elif args.action == "reset":
         save_config(DEFAULT_CONFIG.copy())
-        print("[✓] Config reset to defaults.")
+        ok("Config reset to defaults.")
 
 
 def main():
