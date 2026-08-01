@@ -6,6 +6,10 @@ Author: Light
 
 import re
 import sys
+import subprocess
+import argparse
+import json
+from datetime import datetime
 from pathlib import Path
 
 HASH_PATTERNS = [
@@ -22,19 +26,11 @@ HASH_PATTERNS = [
 
 
 def detect_hash_type(hash_string):
-    """Return list of (mode, name) candidate matches for a given hash string."""
     hash_string = hash_string.strip()
     return [info for pattern, info in HASH_PATTERNS if re.match(pattern, hash_string)]
 
 
-if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        print(detect_hash_type(sys.argv[1]))
-
-
 def check_gpu():
-    """Query hashcat for available backend devices."""
-    import subprocess
     try:
         result = subprocess.run(["hashcat", "-I"], capture_output=True, text=True, timeout=15)
         devices = []
@@ -57,6 +53,10 @@ RULE_SEARCH_PATHS = [
     Path("/usr/share/doc/hashcat/rules"),
     Path("/usr/share/john/rules"),
 ]
+
+# A small, frequency-ranked list tried FIRST before the big exhaustive list.
+# Massively speeds up the common case where the password is actually common.
+PRIORITY_WORDLIST = Path.home() / "wordlists" / "priority.txt"
 
 
 def find_wordlists():
@@ -110,14 +110,33 @@ def prompt_choice(prompt, options, allow_none=True):
 
 
 def log_cracked(hash_type, hash_value, plaintext):
-    from datetime import datetime
     with open(CRACKED_LOG, "a") as f:
         f.write(f"{datetime.now().isoformat()} | {hash_type} | {hash_value} | {plaintext}\n")
 
 
+def check_path_exists(path_str, label):
+    """Pre-flight check: verify a file exists and is actually readable before
+    handing it to hashcat. Catches broken symlinks (e.g. USB not mounted)
+    with a clear message instead of a silent hashcat failure."""
+    if not path_str:
+        return True  # optional paths (like rule) can be None
+    p = Path(path_str)
+    if not p.exists():
+        print(f"[!] {label} not found: {path_str}")
+        if p.is_symlink():
+            print(f"    This is a broken symlink — target may not be mounted/available.")
+        return False
+    if not p.is_file():
+        print(f"[!] {label} is not a regular file: {path_str}")
+        return False
+    return True
+
+
 def run_hashcat(hash_value, mode, wordlist, rule, session_name):
-    import subprocess
-    from datetime import datetime
+    if not check_path_exists(wordlist, "Wordlist"):
+        return None
+    if rule and not check_path_exists(rule, "Rule file"):
+        return None
 
     hash_file = CONFIG_DIR / f"{session_name}_hash.txt"
     hash_file.write_text(hash_value + "\n")
@@ -139,8 +158,22 @@ def run_hashcat(hash_value, mode, wordlist, rule, session_name):
                 print(f"\n[✓] CRACKED: {plain}")
                 log_cracked(mode, hash_value, plain)
                 return plain
-    print("\n[!] Not cracked with this wordlist/rule combo.")
     return None
+
+
+def crack_with_fallback(hash_value, mode, wordlist, rule, session_prefix):
+    """Try the small priority wordlist first (fast common-password win),
+    then fall back to the full wordlist only if that doesn't find a match."""
+    if PRIORITY_WORDLIST.exists():
+        print(f"[*] Trying priority list first ({PRIORITY_WORDLIST})...")
+        plain = run_hashcat(hash_value, mode, str(PRIORITY_WORDLIST), None, f"{session_prefix}_priority")
+        if plain:
+            return plain
+        print("[*] Not in priority list, falling back to full wordlist...")
+    else:
+        print("[*] No priority list found, skipping straight to full wordlist.")
+
+    return run_hashcat(hash_value, mode, wordlist, rule, session_prefix)
 
 
 def cmd_crack(args):
@@ -160,19 +193,25 @@ def cmd_crack(args):
         else:
             mode = input("Enter hashcat mode number manually: ").strip()
 
-    wordlist = args.wordlist or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+    wordlist = args.wordlist
+    if not wordlist:
+        chosen = prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False)
+        wordlist = str(chosen)
+
     rule = args.rule
     if rule is None and not args.no_rule_prompt:
         chosen = prompt_choice("Select a rule file (optional):", find_rules(), allow_none=True)
         rule = str(chosen) if chosen else None
 
-    from datetime import datetime
     session_name = args.session or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run_hashcat(hash_value, mode, wordlist, rule, session_name)
+
+    if args.no_priority:
+        run_hashcat(hash_value, mode, wordlist, rule, session_name)
+    else:
+        crack_with_fallback(hash_value, mode, wordlist, rule, session_name)
 
 
 def cmd_batch(args):
-    """Crack every hash in a file, one at a time, same wordlist/rule for all."""
     ensure_dirs()
     hashes = Path(args.file).read_text().splitlines()
     hashes = [h.strip() for h in hashes if h.strip()]
@@ -189,17 +228,15 @@ def cmd_batch(args):
         if mode is None:
             print("[!] Skipping - could not detect hash type and no --mode given")
             continue
-        plain = run_hashcat(h, mode, wordlist, rule, f"batch_{i}")
+        plain = crack_with_fallback(h, mode, wordlist, rule, f"batch_{i}")
         results[h] = plain
 
     if args.json_out:
-        import json
         Path(args.json_out).write_text(json.dumps(results, indent=2))
         print(f"\n[*] Results exported to {args.json_out}")
 
 
 def cmd_benchmark(args):
-    import subprocess
     subprocess.run(["hashcat", "-b"])
 
 
@@ -207,7 +244,8 @@ def cmd_list_wordlists(args):
     for f in find_wordlists():
         size = f.stat().st_size if f.exists() else 0
         unit = f"{size / (1024**3):.2f} GB" if size > 10**8 else f"{size/1024:.1f} KB"
-        print(f"  {f}  ({unit})")
+        exists = "✓" if f.exists() else "✗ (broken link)"
+        print(f"  {exists} {f}  ({unit})")
 
 
 def cmd_list_rules(args):
@@ -223,7 +261,6 @@ def cmd_gpu(args):
 
 
 def main():
-    import argparse
     parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -234,6 +271,7 @@ def main():
     p_crack.add_argument("--rule")
     p_crack.add_argument("--session")
     p_crack.add_argument("--no-rule-prompt", action="store_true")
+    p_crack.add_argument("--no-priority", action="store_true", help="Skip the fast priority-list pass")
     p_crack.set_defaults(func=cmd_crack)
 
     p_batch = sub.add_parser("batch", help="Crack every hash in a file")
