@@ -80,3 +80,36 @@ def find_rules():
         if base.exists():
             found.extend(sorted(base.glob("*.rule")))
     return found
+
+
+CONFIG_DIR = Path.home() / ".hashwraith"
+CRACKED_LOG = CONFIG_DIR / "cracked.log"
+
+
+def ensure_dirs():
+    CONFIG_DIR.mkdir(exist_ok=True)
+    CRACKED_LOG.touch(exist_ok=True)
+
+
+def prompt_choice(prompt, options, allow_none=True):
+    if not options:
+        print(f"[!] No options found for: {prompt}")
+        return None
+    print(f"\n{prompt}")
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}) {opt}")
+    if allow_none:
+        print("  0) skip / none")
+    while True:
+        choice = input("> ").strip()
+        if allow_none and choice == "0":
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            return options[int(choice) - 1]
+        print("Invalid choice, try again.")
+
+
+def log_cracked(hash_type, hash_value, plaintext):
+    from datetime import datetime
+    with open(CRACKED_LOG, "a") as f:
+        f.write(f"{datetime.now().isoformat()} | {hash_type} | {hash_value} | {plaintext}\n")
