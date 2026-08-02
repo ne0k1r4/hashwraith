@@ -822,6 +822,59 @@ def cmd_auto(args):
     err("Not cracked by any stage. Consider: a larger wordlist, --hashfile for WPA/KeePass, or a custom --mask.")
 
 
+
+# ─── Native multi-hash batch cracking ───────────────────────────────────
+# cmd_batch() above loops one hash at a time - simple, but wasteful: each
+# hash pays its own GPU warm-up, wordlist-load, and rule-compile cost from
+# scratch. hashcat natively supports cracking MANY hashes of the same type
+# in a single invocation (just pass a file with one hash per line) - the
+# GPU loads the wordlist/rules ONCE and tests every hash against every
+# candidate in the same pass. Only works when every hash shares the same
+# mode/type, hence requiring --mode explicitly rather than per-line
+# auto-detection like the old batch command does.
+def cmd_multibatch(args):
+    ensure_dirs()
+    cfg = load_config()
+
+    if not check_path_exists(args.file, "Hash file"):
+        return
+
+    wordlist = args.wordlist or cfg.get("default_wordlist")
+    if not wordlist:
+        wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+    rule = args.rule or cfg.get("default_rule")
+
+    session_name = args.session or f"multibatch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    potfile = CONFIG_DIR / f"{session_name}.pot"
+
+    cmd = ["hashcat", "-m", str(args.mode), "-a", "0", args.file, wordlist,
+           "--session", session_name, "--potfile-path", str(potfile)]
+    if rule:
+        cmd += ["-r", rule]
+
+    info(f"Running native multi-hash attack: {' '.join(cmd)}")
+    subprocess.run(cmd)
+
+    if potfile.exists():
+        content = potfile.read_text().strip()
+        lines = [l for l in content.splitlines() if ":" in l]
+        ok(f"Cracked {len(lines)} hash(es):")
+        for line in lines:
+            h, plain = line.split(":", 1)
+            print(f"  {h} -> {plain}")
+            log_cracked(args.mode, h, plain)
+
+        if args.json_out:
+            results = {}
+            for line in lines:
+                h, plain = line.split(":", 1)
+                results[h] = plain
+            Path(args.json_out).write_text(json.dumps(results, indent=2))
+            info(f"Results exported to {args.json_out}")
+    else:
+        warn("No potfile produced - nothing cracked, or hashcat failed to run.")
+
+
 def main():
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
     mode or a piece of tool-management functionality - see each cmd_*
@@ -879,6 +932,15 @@ def main():
     p_combo.add_argument("--wordlist2", help="Suffix wordlist")
     p_combo.add_argument("--session")
     p_combo.set_defaults(func=cmd_combinator)
+
+    p_multibatch = sub.add_parser("multibatch", help="Crack many hashes of the SAME type in one native hashcat pass (faster than 'batch' for same-type hashes)")
+    p_multibatch.add_argument("--file", required=True, help="File with one hash per line, all the same type")
+    p_multibatch.add_argument("--mode", type=int, required=True, help="hashcat mode - required since all hashes must share one type")
+    p_multibatch.add_argument("--wordlist")
+    p_multibatch.add_argument("--rule")
+    p_multibatch.add_argument("--session")
+    p_multibatch.add_argument("--json-out")
+    p_multibatch.set_defaults(func=cmd_multibatch)
 
     p_auto = sub.add_parser("auto", help="Try every attack strategy in escalating order, stop at first success")
     p_auto.add_argument("--hash")
