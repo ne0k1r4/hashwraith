@@ -486,6 +486,84 @@ def cmd_masks(args):
     print("\nMask syntax: ?l lowercase, ?u uppercase, ?d digit, ?s special, ?a all")
 
 
+
+# ─── Wordlist statistics (inspired by PACK's statsgen) ─────────────────
+def analyze_wordlist(path, sample_size=500000):
+    """Sample a wordlist and report length distribution + charset patterns.
+    Helps decide which mask (see COMMON_MASKS) is worth trying against
+    a similar target population."""
+    lengths = {}
+    charset_patterns = {}
+    count = 0
+
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            word = line.rstrip("\n")
+            if not word:
+                continue
+            count += 1
+            if count > sample_size:
+                break
+
+            l = len(word)
+            lengths[l] = lengths.get(l, 0) + 1
+
+            has_lower = any(c.islower() for c in word)
+            has_upper = any(c.isupper() for c in word)
+            has_digit = any(c.isdigit() for c in word)
+            has_special = any(not c.isalnum() for c in word)
+
+            pattern = ""
+            if has_lower:
+                pattern += "l"
+            if has_upper:
+                pattern += "u"
+            if has_digit:
+                pattern += "d"
+            if has_special:
+                pattern += "s"
+            pattern = pattern or "?"
+            charset_patterns[pattern] = charset_patterns.get(pattern, 0) + 1
+
+    return count, lengths, charset_patterns
+
+
+def cmd_stats(args):
+    path = args.wordlist
+    if not check_path_exists(path, "Wordlist"):
+        return
+
+    info(f"Sampling up to {args.sample:,} entries from {path}...")
+    count, lengths, patterns = analyze_wordlist(path, args.sample)
+
+    print(f"\nSampled {count:,} passwords\n")
+
+    print("Length distribution (top 10):")
+    for length, n in sorted(lengths.items(), key=lambda x: -x[1])[:10]:
+        pct = (n / count) * 100
+        bar = "#" * int(pct / 2)
+        print(f"  {length:>3} chars: {n:>7,} ({pct:5.1f}%) {bar}")
+
+    print("\nCharacter-set pattern distribution (top 10):")
+    pattern_names = {
+        "l": "lowercase only", "u": "uppercase only", "d": "digits only",
+        "s": "special only", "lu": "mixed case", "ld": "lower+digit",
+        "lud": "lower+upper+digit", "lds": "lower+digit+special",
+        "luds": "lower+upper+digit+special",
+    }
+    for pattern, n in sorted(patterns.items(), key=lambda x: -x[1])[:10]:
+        pct = (n / count) * 100
+        name = pattern_names.get(pattern, pattern)
+        bar = "#" * int(pct / 2)
+        print(f"  {pattern:<6} ({name:<28}): {n:>7,} ({pct:5.1f}%) {bar}")
+
+    print("\nSuggested next step: pick a COMMON_MASKS entry (see 'hashwraith masks')")
+    print("that matches the dominant length + pattern above.")
+    warn("If this wordlist has been rule-mutated (leetspeak/symbol injection),")
+    warn("these stats reflect the mutation rules, not raw human password behavior.")
+    warn("For representative human stats, run against an unmutated source list instead.")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -527,6 +605,11 @@ def main():
     p_mask.set_defaults(func=cmd_mask)
 
     sub.add_parser("masks", help="List built-in common mask patterns").set_defaults(func=cmd_masks)
+
+    p_stats = sub.add_parser("stats", help="Analyze a wordlist's length/charset patterns")
+    p_stats.add_argument("--wordlist", required=True)
+    p_stats.add_argument("--sample", type=int, default=500000, help="Max entries to sample (default 500k)")
+    p_stats.set_defaults(func=cmd_stats)
 
     p_config = sub.add_parser("config", help="View or set saved defaults")
     p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
