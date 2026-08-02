@@ -67,6 +67,7 @@ FILE_BASED_HINTS = {
 CONFIG_DIR = Path.home() / ".hashwraith"
 CRACKED_LOG = CONFIG_DIR / "cracked.log"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+HASHCAT_SESSIONS_DIR = Path.home() / ".local" / "share" / "hashcat" / "sessions"
 
 DEFAULT_CONFIG = {
     "default_wordlist": None,
@@ -239,6 +240,25 @@ def crack_single_hash(hash_value, mode, wordlist, rule, session_prefix, cfg, use
 def cmd_crack(args):
     cfg = load_config()
 
+    if args.restore:
+        restore_file = HASHCAT_SESSIONS_DIR / f"{args.restore}.restore"
+        if not restore_file.exists():
+            err(f"No restore file found for session '{args.restore}'. Run 'hashwraith sessions' to see available ones.")
+            sys.exit(1)
+        info(f"Resuming session: {args.restore}")
+        cmd = ["hashcat", "--session", args.restore, "--restore"]
+        subprocess.run(cmd)
+        potfile = CONFIG_DIR / f"{args.restore}.pot"
+        if potfile.exists():
+            content_pot = potfile.read_text().strip()
+            if content_pot:
+                last_line = content_pot.splitlines()[-1]
+                if ":" in last_line:
+                    h, plain = last_line.split(":", 1)
+                    ok(f"CRACKED: {plain}")
+                    log_cracked("restored", h, plain)
+        return
+
     if args.hashfile:
         mode = args.mode
         if mode is None:
@@ -364,6 +384,21 @@ def cmd_formats(args):
         print(f"           → {howto}")
 
 
+def cmd_sessions(args):
+    """List hashcat restore files (interrupted sessions that can be resumed)."""
+    if not HASHCAT_SESSIONS_DIR.exists():
+        print("No resumable sessions found.")
+        return
+    restore_files = sorted(HASHCAT_SESSIONS_DIR.glob("*.restore"))
+    if not restore_files:
+        print("No resumable sessions found.")
+        return
+    print("Resumable sessions (use: hashwraith crack --restore <name>):\n")
+    for rf in restore_files:
+        session_name = rf.stem
+        print(f"  {session_name}")
+
+
 def cmd_config(args):
     cfg = load_config()
     if args.action == "show":
@@ -399,6 +434,7 @@ def main():
     p_crack.add_argument("--no-rule-prompt", action="store_true")
     p_crack.add_argument("--no-priority", action="store_true")
     p_crack.add_argument("--yes", action="store_true", help="Non-interactive: fail loudly instead of prompting if something required is missing")
+    p_crack.add_argument("--restore", metavar="SESSION_NAME", help="Resume a previously interrupted session by name")
     p_crack.set_defaults(func=cmd_crack)
 
     p_batch = sub.add_parser("batch", help="Crack every hash in a file")
@@ -415,6 +451,7 @@ def main():
     sub.add_parser("rules", help="List discovered rule files").set_defaults(func=cmd_list_rules)
     sub.add_parser("gpu", help="Show detected GPU devices").set_defaults(func=cmd_gpu)
     sub.add_parser("formats", help="List all supported hash formats").set_defaults(func=cmd_formats)
+    sub.add_parser("sessions", help="List resumable (interrupted) sessions").set_defaults(func=cmd_sessions)
 
     p_config = sub.add_parser("config", help="View or set saved defaults")
     p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
