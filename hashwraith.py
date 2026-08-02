@@ -240,17 +240,33 @@ def cmd_crack(args):
     cfg = load_config()
 
     if args.hashfile:
-        mode = args.mode or input("Enter hashcat mode number for this file: ").strip()
-        wordlist = args.wordlist or cfg.get("default_wordlist") or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+        mode = args.mode
+        if mode is None:
+            if args.yes:
+                err("--yes was set but no --mode given for --hashfile input. Aborting.")
+                sys.exit(1)
+            mode = input("Enter hashcat mode number for this file: ").strip()
+        wordlist = args.wordlist or cfg.get("default_wordlist")
+        if not wordlist:
+            if args.yes:
+                err("--yes was set but no wordlist given and no default configured. Aborting.")
+                sys.exit(1)
+            wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
         rule = args.rule or cfg.get("default_rule")
-        if rule is None and not args.no_rule_prompt:
+        if rule is None and not args.no_rule_prompt and not args.yes:
             chosen = prompt_choice("Select a rule file (optional):", find_rules(), allow_none=True)
             rule = str(chosen) if chosen else None
         session_name = args.session or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         run_hashcat(args.hashfile, mode, wordlist, rule, session_name)
         return
 
-    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+    if not args.hash and not args.hashfile:
+        if args.yes:
+            err("--yes was set but no --hash or --hashfile was given. Aborting.")
+            sys.exit(1)
+        hash_value = input("Enter the hash to crack: ").strip()
+    else:
+        hash_value = args.hash
 
     mode = args.mode
     if mode is None:
@@ -269,10 +285,13 @@ def cmd_crack(args):
 
     wordlist = args.wordlist or cfg.get("default_wordlist")
     if not wordlist:
+        if args.yes:
+            err("--yes was set but no wordlist given and no default configured. Aborting.")
+            sys.exit(1)
         wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
 
     rule = args.rule or cfg.get("default_rule")
-    if rule is None and not args.no_rule_prompt:
+    if rule is None and not args.no_rule_prompt and not args.yes:
         chosen = prompt_choice("Select a rule file (optional):", find_rules(), allow_none=True)
         rule = str(chosen) if chosen else None
 
@@ -286,7 +305,12 @@ def cmd_batch(args):
     hashes = [h.strip() for h in hashes if h.strip()]
     info(f"Loaded {len(hashes)} hashes from {args.file}")
 
-    wordlist = args.wordlist or cfg.get("default_wordlist") or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+    wordlist = args.wordlist or cfg.get("default_wordlist")
+    if not wordlist:
+        if args.yes:
+            err("--yes was set but no wordlist given and no default configured. Aborting.")
+            sys.exit(1)
+        wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
     rule = args.rule or cfg.get("default_rule")
 
     results = {}
@@ -374,6 +398,7 @@ def main():
     p_crack.add_argument("--session")
     p_crack.add_argument("--no-rule-prompt", action="store_true")
     p_crack.add_argument("--no-priority", action="store_true")
+    p_crack.add_argument("--yes", action="store_true", help="Non-interactive: fail loudly instead of prompting if something required is missing")
     p_crack.set_defaults(func=cmd_crack)
 
     p_batch = sub.add_parser("batch", help="Crack every hash in a file")
@@ -382,6 +407,7 @@ def main():
     p_batch.add_argument("--wordlist")
     p_batch.add_argument("--rule")
     p_batch.add_argument("--json-out")
+    p_batch.add_argument("--yes", action="store_true", help="Non-interactive mode")
     p_batch.set_defaults(func=cmd_batch)
 
     sub.add_parser("benchmark", help="Run hashcat's benchmark").set_defaults(func=cmd_benchmark)
