@@ -1018,6 +1018,50 @@ def cmd_hybrid(args):
     run_hybrid_attack(hash_file, mode, wordlist, mask, direction, session_name)
 
 
+
+# ─── --show integration ─────────────────────────────────────────────────
+# hashcat can recall already-cracked results from a potfile WITHOUT
+# re-running the attack, via --show. Useful for "have I already cracked
+# this hash?" - either checking one specific potfile by session name, or
+# scanning every potfile in ~/.hashwraith/ for a match.
+def cmd_show(args):
+    ensure_dirs()
+
+    if args.session:
+        potfile = CONFIG_DIR / f"{args.session}.pot"
+        if not check_path_exists(potfile, "Potfile"):
+            return
+        result = subprocess.run(
+            ["hashcat", "-m", str(args.mode), "--show", str(potfile)],
+            capture_output=True, text=True
+        )
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        else:
+            warn(f"No cracked results in potfile for session '{args.session}'.")
+        return
+
+    # no specific session given - just grep our own cracked.log instead of
+    # shelling out to hashcat --show once per potfile, much simpler and
+    # doesn't require knowing the mode ahead of time
+    if not args.hash:
+        err("Provide either --session (with --mode) or --hash to look up.")
+        sys.exit(1)
+
+    if not CRACKED_LOG.exists() or CRACKED_LOG.stat().st_size == 0:
+        print("No cracked hashes logged yet.")
+        return
+
+    lines = CRACKED_LOG.read_text().strip().splitlines()
+    matches = [l for l in lines if args.hash.lower() in l.lower()]
+    if matches:
+        ok(f"Already cracked - found in history:")
+        for m in matches:
+            print(f"  {m}")
+    else:
+        warn(f"'{args.hash}' not found in cracked-hash history. Not previously cracked (by this tool).")
+
+
 def main():
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
     mode or a piece of tool-management functionality - see each cmd_*
@@ -1109,6 +1153,12 @@ def main():
     p_auto.add_argument("--rule")
     p_auto.add_argument("--session")
     p_auto.set_defaults(func=cmd_auto)
+
+    p_show = sub.add_parser("show", help="Check if a hash was already cracked, without re-running hashcat")
+    p_show.add_argument("--hash", help="Hash to look up in cracked-hash history")
+    p_show.add_argument("--session", help="Check a specific session's potfile directly (needs --mode)")
+    p_show.add_argument("--mode", type=int, help="hashcat mode, required when using --session")
+    p_show.set_defaults(func=cmd_show)
 
     p_config = sub.add_parser("config", help="View or set saved defaults")
     p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
