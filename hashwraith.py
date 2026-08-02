@@ -564,6 +564,54 @@ def cmd_stats(args):
     warn("For representative human stats, run against an unmutated source list instead.")
 
 
+
+# ─── Combinator attack (-a 1) ───────────────────────────────────────────
+# Combines every word from list1 with every word from list2 - e.g.
+# firstnames.txt + suffixes.txt catches patterns like "john2023", "sarah!"
+def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name):
+    potfile = CONFIG_DIR / f"{session_name}.pot"
+    cmd = ["hashcat", "-m", str(mode), "-a", "1", str(target_file), wordlist1, wordlist2,
+           "--session", session_name, "--potfile-path", str(potfile)]
+    info(f"Running combinator attack: {' '.join(cmd)}")
+    subprocess.run(cmd)
+    if potfile.exists():
+        content = potfile.read_text().strip()
+        if content:
+            last_line = content.splitlines()[-1]
+            if ":" in last_line:
+                h, plain = last_line.split(":", 1)
+                ok(f"CRACKED: {plain}")
+                log_cracked(mode, h, plain)
+                return plain
+    return None
+
+
+def cmd_combinator(args):
+    ensure_dirs()
+    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+
+    mode = args.mode
+    if mode is None:
+        candidates = detect_hash_type(hash_value)
+        if candidates:
+            mode = candidates[0][0]
+            info(f"Detected hash type: {candidates[0][1]} (hashcat mode {mode})")
+        else:
+            mode = input("Enter hashcat mode number manually: ").strip()
+
+    wordlist1 = args.wordlist1
+    if not wordlist1:
+        wordlist1 = str(prompt_choice("Select the FIRST wordlist (prefix):", find_wordlists(), allow_none=False))
+    wordlist2 = args.wordlist2
+    if not wordlist2:
+        wordlist2 = str(prompt_choice("Select the SECOND wordlist (suffix):", find_wordlists(), allow_none=False))
+
+    hash_file = CONFIG_DIR / f"combo_{datetime.now().strftime('%Y%m%d_%H%M%S')}_hash.txt"
+    hash_file.write_text(hash_value + "\n")
+    session_name = args.session or f"combo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_combinator_attack(hash_file, mode, wordlist1, wordlist2, session_name)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -610,6 +658,14 @@ def main():
     p_stats.add_argument("--wordlist", required=True)
     p_stats.add_argument("--sample", type=int, default=500000, help="Max entries to sample (default 500k)")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_combo = sub.add_parser("combinator", help="Combine two wordlists (-a 1): every word from list1 + every word from list2")
+    p_combo.add_argument("--hash")
+    p_combo.add_argument("--mode", type=int)
+    p_combo.add_argument("--wordlist1", help="Prefix wordlist")
+    p_combo.add_argument("--wordlist2", help="Suffix wordlist")
+    p_combo.add_argument("--session")
+    p_combo.set_defaults(func=cmd_combinator)
 
     p_config = sub.add_parser("config", help="View or set saved defaults")
     p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
