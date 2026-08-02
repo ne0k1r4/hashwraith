@@ -875,6 +875,39 @@ def cmd_multibatch(args):
         warn("No potfile produced - nothing cracked, or hashcat failed to run.")
 
 
+
+# ─── Cracked-hash history/search ────────────────────────────────────────
+def cmd_history(args):
+    """Search/display the cracked-hash log. Supports filtering by a
+    substring match against hash, plaintext, or mode - useful once
+    cracked.log has accumulated hundreds of entries across sessions."""
+    ensure_dirs()
+    if not CRACKED_LOG.exists() or CRACKED_LOG.stat().st_size == 0:
+        print("No cracked hashes logged yet.")
+        return
+
+    lines = CRACKED_LOG.read_text().strip().splitlines()
+    if args.search:
+        lines = [l for l in lines if args.search.lower() in l.lower()]
+
+    if args.limit:
+        lines = lines[-args.limit:]
+
+    if not lines:
+        print(f"No entries match '{args.search}'.")
+        return
+
+    for line in lines:
+        parts = line.split(" | ")
+        if len(parts) == 4:
+            timestamp, mode, hash_val, plain = parts
+            print(f"  {C.CYAN}{timestamp}{C.RESET}  mode={mode}  {hash_val[:20]}...  -> {C.GREEN}{C.BOLD}{plain}{C.RESET}")
+        else:
+            print(f"  {line}")
+
+    print(f"\n{len(lines)} entr{'y' if len(lines) == 1 else 'ies'} shown.")
+
+
 def main():
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
     mode or a piece of tool-management functionality - see each cmd_*
@@ -932,6 +965,11 @@ def main():
     p_combo.add_argument("--wordlist2", help="Suffix wordlist")
     p_combo.add_argument("--session")
     p_combo.set_defaults(func=cmd_combinator)
+
+    p_history = sub.add_parser("history", help="Search/view the cracked-hash log")
+    p_history.add_argument("--search", help="Filter by substring match against hash, mode, or plaintext")
+    p_history.add_argument("--limit", type=int, help="Show only the last N entries")
+    p_history.set_defaults(func=cmd_history)
 
     p_multibatch = sub.add_parser("multibatch", help="Crack many hashes of the SAME type in one native hashcat pass (faster than 'batch' for same-type hashes)")
     p_multibatch.add_argument("--file", required=True, help="File with one hash per line, all the same type")
