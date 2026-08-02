@@ -420,6 +420,72 @@ def cmd_config(args):
         ok("Config reset to defaults.")
 
 
+
+# ─── Mask attacks (-a 3) ────────────────────────────────────────────────
+# Common human password patterns, roughly ordered cheapest-first.
+# ?l lowercase  ?u uppercase  ?d digit  ?s special  ?a all
+COMMON_MASKS = {
+    "4-digit PIN": "?d?d?d?d",
+    "6-digit PIN": "?d?d?d?d?d?d",
+    "8 lowercase letters": "?l?l?l?l?l?l?l?l",
+    "Word + 2 digits (e.g. summer23)": "?l?l?l?l?l?l?d?d",
+    "Capitalized word + 2 digits (e.g. Summer23)": "?u?l?l?l?l?l?d?d",
+    "Capitalized word + 4 digits (e.g. Summer2023)": "?u?l?l?l?l?l?d?d?d?d",
+    "Word + special + 2 digits (e.g. summer!23)": "?l?l?l?l?l?l?s?d?d",
+    "8-char fully random (all charsets)": "?a?a?a?a?a?a?a?a",
+}
+
+
+def run_mask_attack(target_file, mode, mask, session_name):
+    potfile = CONFIG_DIR / f"{session_name}.pot"
+    cmd = ["hashcat", "-m", str(mode), "-a", "3", str(target_file), mask,
+           "--session", session_name, "--potfile-path", str(potfile)]
+    info(f"Running mask attack: {' '.join(cmd)}")
+    subprocess.run(cmd)
+    if potfile.exists():
+        content = potfile.read_text().strip()
+        if content:
+            last_line = content.splitlines()[-1]
+            if ":" in last_line:
+                h, plain = last_line.split(":", 1)
+                ok(f"CRACKED: {plain}")
+                log_cracked(mode, h, plain)
+                return plain
+    return None
+
+
+def cmd_mask(args):
+    ensure_dirs()
+    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+
+    mode = args.mode
+    if mode is None:
+        candidates = detect_hash_type(hash_value)
+        if candidates:
+            mode = candidates[0][0]
+            info(f"Detected hash type: {candidates[0][1]} (hashcat mode {mode})")
+        else:
+            mode = input("Enter hashcat mode number manually: ").strip()
+
+    mask = args.mask
+    if not mask:
+        labels = list(COMMON_MASKS.keys())
+        choice = prompt_choice("Select a common mask (or supply --mask yourself next time):", labels, allow_none=False)
+        mask = COMMON_MASKS[choice]
+
+    hash_file = CONFIG_DIR / f"mask_{datetime.now().strftime('%Y%m%d_%H%M%S')}_hash.txt"
+    hash_file.write_text(hash_value + "\n")
+    session_name = args.session or f"mask_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_mask_attack(hash_file, mode, mask, session_name)
+
+
+def cmd_masks(args):
+    print("Built-in common masks (use with: hashwraith mask --mask '<pattern>'):\n")
+    for name, pattern in COMMON_MASKS.items():
+        print(f"  {pattern:<20} {name}")
+    print("\nMask syntax: ?l lowercase, ?u uppercase, ?d digit, ?s special, ?a all")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -452,6 +518,15 @@ def main():
     sub.add_parser("gpu", help="Show detected GPU devices").set_defaults(func=cmd_gpu)
     sub.add_parser("formats", help="List all supported hash formats").set_defaults(func=cmd_formats)
     sub.add_parser("sessions", help="List resumable (interrupted) sessions").set_defaults(func=cmd_sessions)
+
+    p_mask = sub.add_parser("mask", help="Crack using a pattern-based mask attack instead of a wordlist")
+    p_mask.add_argument("--hash")
+    p_mask.add_argument("--mode", type=int)
+    p_mask.add_argument("--mask", help="Custom hashcat mask, e.g. ?u?l?l?l?l?l?d?d")
+    p_mask.add_argument("--session")
+    p_mask.set_defaults(func=cmd_mask)
+
+    sub.add_parser("masks", help="List built-in common mask patterns").set_defaults(func=cmd_masks)
 
     p_config = sub.add_parser("config", help="View or set saved defaults")
     p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
