@@ -113,3 +113,145 @@ def log_cracked(hash_type, hash_value, plaintext):
     from datetime import datetime
     with open(CRACKED_LOG, "a") as f:
         f.write(f"{datetime.now().isoformat()} | {hash_type} | {hash_value} | {plaintext}\n")
+
+
+def run_hashcat(hash_value, mode, wordlist, rule, session_name):
+    import subprocess
+    from datetime import datetime
+
+    hash_file = CONFIG_DIR / f"{session_name}_hash.txt"
+    hash_file.write_text(hash_value + "\n")
+    potfile = CONFIG_DIR / f"{session_name}.pot"
+
+    cmd = ["hashcat", "-m", str(mode), "-a", "0", str(hash_file), wordlist,
+           "--session", session_name, "--potfile-path", str(potfile)]
+    if rule:
+        cmd += ["-r", rule]
+
+    print(f"\n[*] Running: {' '.join(cmd)}\n")
+    subprocess.run(cmd)
+
+    if potfile.exists():
+        content = potfile.read_text().strip()
+        for line in content.splitlines():
+            if ":" in line:
+                h, plain = line.split(":", 1)
+                print(f"\n[✓] CRACKED: {plain}")
+                log_cracked(mode, hash_value, plain)
+                return plain
+    print("\n[!] Not cracked with this wordlist/rule combo.")
+    return None
+
+
+def cmd_crack(args):
+    ensure_dirs()
+    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+
+    mode = args.mode
+    if mode is None:
+        candidates = detect_hash_type(hash_value)
+        if len(candidates) == 1:
+            mode, name = candidates[0]
+            print(f"[*] Detected hash type: {name} (hashcat mode {mode})")
+        elif candidates:
+            labels = [f"{n} (mode {m})" for m, n in candidates]
+            choice = prompt_choice("Select the correct hash type:", labels, allow_none=False)
+            mode = candidates[labels.index(choice)][0]
+        else:
+            mode = input("Enter hashcat mode number manually: ").strip()
+
+    wordlist = args.wordlist or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+    rule = args.rule
+    if rule is None and not args.no_rule_prompt:
+        chosen = prompt_choice("Select a rule file (optional):", find_rules(), allow_none=True)
+        rule = str(chosen) if chosen else None
+
+    from datetime import datetime
+    session_name = args.session or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_hashcat(hash_value, mode, wordlist, rule, session_name)
+
+
+def cmd_batch(args):
+    """Crack every hash in a file, one at a time, same wordlist/rule for all."""
+    ensure_dirs()
+    hashes = Path(args.file).read_text().splitlines()
+    hashes = [h.strip() for h in hashes if h.strip()]
+    print(f"[*] Loaded {len(hashes)} hashes from {args.file}")
+
+    wordlist = args.wordlist or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+    rule = args.rule
+
+    results = {}
+    for i, h in enumerate(hashes, 1):
+        print(f"\n=== [{i}/{len(hashes)}] {h[:50]} ===")
+        candidates = detect_hash_type(h)
+        mode = candidates[0][0] if candidates else args.mode
+        if mode is None:
+            print("[!] Skipping - could not detect hash type and no --mode given")
+            continue
+        plain = run_hashcat(h, mode, wordlist, rule, f"batch_{i}")
+        results[h] = plain
+
+    if args.json_out:
+        import json
+        Path(args.json_out).write_text(json.dumps(results, indent=2))
+        print(f"\n[*] Results exported to {args.json_out}")
+
+
+def cmd_benchmark(args):
+    import subprocess
+    subprocess.run(["hashcat", "-b"])
+
+
+def cmd_list_wordlists(args):
+    for f in find_wordlists():
+        size = f.stat().st_size if f.exists() else 0
+        unit = f"{size / (1024**3):.2f} GB" if size > 10**8 else f"{size/1024:.1f} KB"
+        print(f"  {f}  ({unit})")
+
+
+def cmd_list_rules(args):
+    for r in find_rules():
+        print(f"  {r}")
+
+
+def cmd_gpu(args):
+    devices = check_gpu()
+    print("[*] Detected devices:" if devices else "[!] No devices detected.")
+    for d in devices:
+        print(f"  - {d}")
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_crack = sub.add_parser("crack", help="Crack a single hash")
+    p_crack.add_argument("--hash")
+    p_crack.add_argument("--mode", type=int)
+    p_crack.add_argument("--wordlist")
+    p_crack.add_argument("--rule")
+    p_crack.add_argument("--session")
+    p_crack.add_argument("--no-rule-prompt", action="store_true")
+    p_crack.set_defaults(func=cmd_crack)
+
+    p_batch = sub.add_parser("batch", help="Crack every hash in a file")
+    p_batch.add_argument("--file", required=True)
+    p_batch.add_argument("--mode", type=int)
+    p_batch.add_argument("--wordlist")
+    p_batch.add_argument("--rule")
+    p_batch.add_argument("--json-out")
+    p_batch.set_defaults(func=cmd_batch)
+
+    sub.add_parser("benchmark", help="Run hashcat's benchmark").set_defaults(func=cmd_benchmark)
+    sub.add_parser("wordlists", help="List discovered wordlists").set_defaults(func=cmd_list_wordlists)
+    sub.add_parser("rules", help="List discovered rule files").set_defaults(func=cmd_list_rules)
+    sub.add_parser("gpu", help="Show detected GPU devices").set_defaults(func=cmd_gpu)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
