@@ -758,6 +758,70 @@ def cmd_combinator(args):
     run_combinator_attack(hash_file, mode, wordlist1, wordlist2, session_name)
 
 
+
+# ─── Auto escalation mode ───────────────────────────────────────────────
+# Chains every attack strategy in cheapest-to-most-expensive order,
+# stopping the moment one succeeds. Philosophy borrowed from naive-hashcat
+# (dictionary -> combinator -> mask, escalating), but built on our own
+# existing attack functions rather than hardcoded hashcat calls - this is
+# genuinely "run everything reasonable and stop when it works" instead of
+# making the user pick a strategy up front.
+def cmd_auto(args):
+    """Try, in order: priority wordlist -> full wordlist (+rule if given)
+    -> each COMMON_MASKS pattern. Stops at the first crack. Reports which
+    stage succeeded so you know what actually worked."""
+    cfg = load_config()
+    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+
+    mode = args.mode
+    if mode is None:
+        candidates = detect_hash_type(hash_value)
+        if len(candidates) == 1:
+            mode, name = candidates[0]
+            info(f"Detected hash type: {name} (hashcat mode {mode})")
+        elif candidates:
+            labels = [f"{n} (mode {m})" for m, n in candidates]
+            choice = prompt_choice("Select the correct hash type:", labels, allow_none=False)
+            mode = candidates[labels.index(choice)][0]
+        else:
+            mode = input("Enter hashcat mode number manually: ").strip()
+
+    wordlist = args.wordlist or cfg.get("default_wordlist")
+    rule = args.rule or cfg.get("default_rule")
+    session_base = args.session or f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+    info("=== Stage 1/3: priority wordlist ===")
+    hash_file = CONFIG_DIR / f"{session_base}_hash.txt"
+    hash_file.write_text(hash_value + "\n")
+    priority_path = cfg.get("priority_wordlist")
+    if priority_path and Path(priority_path).exists():
+        plain = run_hashcat(hash_file, mode, priority_path, None, f"{session_base}_stage1")
+        if plain:
+            ok(f"Cracked at Stage 1 (priority wordlist): {plain}")
+            return
+    else:
+        warn("No priority wordlist configured, skipping stage 1.")
+
+    if wordlist:
+        info("=== Stage 2/3: full wordlist" + (" + rule" if rule else "") + " ===")
+        plain = run_hashcat(hash_file, mode, wordlist, rule, f"{session_base}_stage2")
+        if plain:
+            ok(f"Cracked at Stage 2 (full wordlist): {plain}")
+            return
+    else:
+        warn("No wordlist given/configured, skipping stage 2.")
+
+    info("=== Stage 3/3: common mask patterns ===")
+    for name, pattern in COMMON_MASKS.items():
+        info(f"Trying mask: {name} ({pattern})")
+        plain = run_mask_attack(hash_file, mode, pattern, f"{session_base}_mask_{name.replace(chr(32), chr(95))[:20]}")
+        if plain:
+            ok(f"Cracked at Stage 3 (mask: {name}): {plain}")
+            return
+
+    err("Not cracked by any stage. Consider: a larger wordlist, --hashfile for WPA/KeePass, or a custom --mask.")
+
+
 def main():
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
     mode or a piece of tool-management functionality - see each cmd_*
@@ -815,6 +879,14 @@ def main():
     p_combo.add_argument("--wordlist2", help="Suffix wordlist")
     p_combo.add_argument("--session")
     p_combo.set_defaults(func=cmd_combinator)
+
+    p_auto = sub.add_parser("auto", help="Try every attack strategy in escalating order, stop at first success")
+    p_auto.add_argument("--hash")
+    p_auto.add_argument("--mode", type=int)
+    p_auto.add_argument("--wordlist")
+    p_auto.add_argument("--rule")
+    p_auto.add_argument("--session")
+    p_auto.set_defaults(func=cmd_auto)
 
     p_config = sub.add_parser("config", help="View or set saved defaults")
     p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
