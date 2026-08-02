@@ -97,6 +97,8 @@ FILE_BASED_HINTS = {
 # its own default location (see HASHCAT_SESSIONS_DIR below) regardless of
 # --potfile-path; that was a real bug caught during testing, not a design
 # choice - hashcat's --restore mechanism ignores custom paths entirely.
+DRY_RUN = False  # set by --dry-run, checked in every run_* function before subprocess.run
+
 CONFIG_DIR = Path.home() / ".hashwraith"
 CRACKED_LOG = CONFIG_DIR / "cracked.log"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -286,6 +288,9 @@ def run_hashcat(target_file, mode, wordlist, rule, session_name):
         cmd += ["-r", rule]
 
     print(f"\n[*] Running: {' '.join(cmd)}\n")
+    if DRY_RUN:
+        info("(dry run - not actually executing)")
+        return None
     subprocess.run(cmd)
 
     if potfile.exists():
@@ -564,6 +569,9 @@ def run_mask_attack(target_file, mode, mask, session_name):
     cmd = ["hashcat", "-m", str(mode), "-a", "3", str(target_file), mask,
            "--session", session_name, "--potfile-path", str(potfile)]
     info(f"Running mask attack: {' '.join(cmd)}")
+    if DRY_RUN:
+        info("(dry run - not actually executing)")
+        return None
     subprocess.run(cmd)
     if potfile.exists():
         content = potfile.read_text().strip()
@@ -711,6 +719,9 @@ def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name)
     cmd = ["hashcat", "-m", str(mode), "-a", "1", str(target_file), wordlist1, wordlist2,
            "--session", session_name, "--potfile-path", str(potfile)]
     info(f"Running combinator attack: {' '.join(cmd)}")
+    if DRY_RUN:
+        info("(dry run - not actually executing)")
+        return None
     subprocess.run(cmd)
     if potfile.exists():
         content = potfile.read_text().strip()
@@ -908,6 +919,7 @@ def main():
     mode or a piece of tool-management functionality - see each cmd_*
     function above for the reasoning behind that specific command."""
     parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
+    parser.add_argument("--dry-run", action="store_true", help="Print the hashcat command that would run, without executing it")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_crack = sub.add_parser("crack", help="Crack a single hash or hash file")
@@ -989,6 +1001,8 @@ def main():
     p_config.set_defaults(func=cmd_config)
 
     args = parser.parse_args()
+    global DRY_RUN
+    DRY_RUN = getattr(args, "dry_run", False)
     args.func(args)
 
 
