@@ -33,7 +33,11 @@ never limits what hashcat itself can do.
 - **Scriptable** — `--yes` skips all prompts and fails loudly instead of
   hanging, for use in scripts/CI
 - **Cracked-hash log** — every successful crack logged with timestamp to
-  `~/.hashwraith/cracked.log`
+  `~/.hashwraith/cracked.log`, searchable via `history`
+- **Auto escalation mode** — tries priority list, then full wordlist, then
+  every built-in mask pattern in order, stopping at the first crack
+- **Native multi-hash batching** — crack many hashes of the same type in
+  one hashcat pass (shares GPU warm-up/wordlist load), faster than looping
 
 ## Install
 
@@ -71,6 +75,16 @@ hashwraith crack --hashfile capture.hc22000 --mode 22000 --wordlist rockyou.txt
 # resume an interrupted session
 hashwraith sessions                 # list resumable sessions
 hashwraith crack --restore <session_name>
+
+# let the tool try everything and stop at the first crack
+hashwraith auto --hash <hash>
+
+# crack many hashes of the SAME type in one fast pass
+hashwraith multibatch --file hashes.txt --mode 0 --wordlist rockyou.txt
+
+# search the cracked-hash log
+hashwraith history
+hashwraith history --search summer --limit 10
 
 # analyze a wordlist's patterns
 hashwraith stats --wordlist rockyou.txt
