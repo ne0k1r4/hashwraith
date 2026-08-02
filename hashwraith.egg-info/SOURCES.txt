@@ -1,0 +1,11 @@
+LICENSE
+README.md
+pyproject.toml
+hashwraith.egg-info/PKG-INFO
+hashwraith.egg-info/SOURCES.txt
+hashwraith.egg-info/dependency_links.txt
+hashwraith.egg-info/entry_points.txt
+hashwraith.egg-info/top_level.txt
+hashwraith_pkg/__init__.py
+hashwraith_pkg/__main__.py
+tests/test_hashwraith.py
