@@ -835,50 +835,69 @@ def cmd_auto(args):
 # candidate in the same pass. Only works when every hash shares the same
 # mode/type, hence requiring --mode explicitly rather than per-line
 # auto-detection like the old batch command does.
+def _run_multibatch_group(hash_lines, mode, wordlist, rule, session_name, json_results):
+    group_file = CONFIG_DIR / f"{session_name}_hashes.txt"
+    group_file.write_text("\n".join(hash_lines) + "\n")
+    potfile = CONFIG_DIR / f"{session_name}.pot"
+    cmd = ["hashcat", "-m", str(mode), "-a", "0", str(group_file), wordlist,
+           "--session", session_name, "--potfile-path", str(potfile)]
+    if rule:
+        cmd += ["-r", rule]
+    info(f"Running native multi-hash attack (mode {mode}, {len(hash_lines)} hashes): {' '.join(cmd)}")
+    if DRY_RUN:
+        info("(dry run - not actually executing)")
+        return
+    subprocess.run(cmd)
+    if potfile.exists():
+        content = potfile.read_text().strip()
+        lines = [l for l in content.splitlines() if ":" in l]
+        ok(f"Cracked {len(lines)} of {len(hash_lines)} hash(es) in mode {mode}:")
+        for line in lines:
+            h, plain = line.split(":", 1)
+            print(f"  {h} -> {plain}")
+            log_cracked(mode, h, plain)
+            json_results[h] = plain
+    else:
+        warn(f"No potfile produced for mode {mode} group - nothing cracked, or hashcat failed to run.")
+
+
 def cmd_multibatch(args):
-    # TODO: this requires the same --mode for every hash in the file,
-    # would be nice to auto-group by detected type and run one hashcat
-    # pass per group instead of forcing the user to pre-sort them
     ensure_dirs()
     cfg = load_config()
-
     if not check_path_exists(args.file, "Hash file"):
         return
-
     wordlist = args.wordlist or cfg.get("default_wordlist")
     if not wordlist:
         wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
     rule = args.rule or cfg.get("default_rule")
 
-    session_name = args.session or f"multibatch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    potfile = CONFIG_DIR / f"{session_name}.pot"
+    all_hashes = [h.strip() for h in Path(args.file).read_text().splitlines() if h.strip()]
+    json_results = {}
 
-    cmd = ["hashcat", "-m", str(args.mode), "-a", "0", args.file, wordlist,
-           "--session", session_name, "--potfile-path", str(potfile)]
-    if rule:
-        cmd += ["-r", rule]
-
-    info(f"Running native multi-hash attack: {' '.join(cmd)}")
-    subprocess.run(cmd)
-
-    if potfile.exists():
-        content = potfile.read_text().strip()
-        lines = [l for l in content.splitlines() if ":" in l]
-        ok(f"Cracked {len(lines)} hash(es):")
-        for line in lines:
-            h, plain = line.split(":", 1)
-            print(f"  {h} -> {plain}")
-            log_cracked(args.mode, h, plain)
-
-        if args.json_out:
-            results = {}
-            for line in lines:
-                h, plain = line.split(":", 1)
-                results[h] = plain
-            Path(args.json_out).write_text(json.dumps(results, indent=2))
-            info(f"Results exported to {args.json_out}")
+    if args.mode is not None:
+        session_name = args.session or f"multibatch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        _run_multibatch_group(all_hashes, args.mode, wordlist, rule, session_name, json_results)
     else:
-        warn("No potfile produced - nothing cracked, or hashcat failed to run.")
+        info("No --mode given, auto-detecting and grouping hashes by type...")
+        groups = {}
+        skipped = []
+        for h in all_hashes:
+            candidates = detect_hash_type(h)
+            if not candidates:
+                skipped.append(h)
+                continue
+            mode = candidates[0][0]
+            groups.setdefault(mode, []).append(h)
+        if skipped:
+            warn(f"{len(skipped)} hash(es) could not be auto-detected and will be skipped.")
+        info(f"Found {len(groups)} distinct hash type(s): {list(groups.keys())}")
+        for mode, hashes_in_group in groups.items():
+            session_name = f"{args.session or 'multibatch'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_mode{mode}"
+            _run_multibatch_group(hashes_in_group, mode, wordlist, rule, session_name, json_results)
+
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(json_results, indent=2))
+        info(f"Results exported to {args.json_out}")
 
 
 
@@ -980,7 +999,7 @@ def main():
 
     p_multibatch = sub.add_parser("multibatch", help="Crack many hashes of the SAME type in one native hashcat pass (faster than 'batch' for same-type hashes)")
     p_multibatch.add_argument("--file", required=True, help="File with one hash per line, all the same type")
-    p_multibatch.add_argument("--mode", type=int, required=True, help="hashcat mode - required since all hashes must share one type")
+    p_multibatch.add_argument("--mode", type=int, help="hashcat mode - if omitted, hashes are auto-detected and grouped by type")
     p_multibatch.add_argument("--wordlist")
     p_multibatch.add_argument("--rule")
     p_multibatch.add_argument("--session")

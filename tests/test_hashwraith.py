@@ -147,17 +147,41 @@ class TestCLIParsing(unittest.TestCase):
         # if hashwraith module imported fine (already true by this point),
         # the parser construction in main() didn't crash - good enough
 
-    def test_multibatch_requires_mode(self):
-        # multibatch's --mode is required=True in the parser - this is
-        # important since it can't auto-detect per-hash the way single
-        # crack/batch can (all hashes must share one type)
+    def test_multibatch_requires_file(self):
+        # --file is still required=True - --mode became optional once
+        # auto-grouping-by-type landed, but you still need to point it
+        # at something
         result = subprocess.run(
             [sys.executable, str(Path(__file__).parent.parent / "hashwraith_pkg" / "__init__.py"),
-             "multibatch", "--file", "/tmp/nonexistent.txt"],
+             "multibatch"],
             capture_output=True, text=True
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("required", result.stderr.lower())
+
+    def test_multibatch_mode_is_optional(self):
+        # the whole point of auto-grouping - this should NOT error just
+        # for omitting --mode (unlike the old behavior before grouping
+        # was added)
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent.parent / "hashwraith_pkg" / "__init__.py"),
+             "multibatch", "--file", "/tmp/nonexistent_hashwraith_test.txt", "--wordlist", "/tmp/nonexistent_wl.txt"],
+            capture_output=True, text=True
+        )
+        # should fail because the FILE doesn't exist (our own check_path_exists
+        # warning), not because argparse rejected a missing --mode
+        self.assertNotIn("required", result.stderr.lower())
+
+    def test_hash_grouping_by_type(self):
+        # this is the actual logic multibatch's auto-grouping relies on -
+        # detect_hash_type should split an MD5 and a SHA1 into different groups
+        md5_hash = "5f4dcc3b5aa765d61d8327deb882cf99"
+        sha1_hash = "5baa61e4c9b93f3f0682250b6cf8331b7ee68fd8"
+        md5_mode = hashwraith.detect_hash_type(md5_hash)[0][0]
+        sha1_mode = hashwraith.detect_hash_type(sha1_hash)[0][0]
+        self.assertNotEqual(md5_mode, sha1_mode)
+        self.assertEqual(md5_mode, 0)
+        self.assertEqual(sha1_mode, 100)
 
 
 class TestHistoryFiltering(unittest.TestCase):
