@@ -12,7 +12,6 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-# (mode, name, notes) - notes flag anything needing special handling
 HASH_PATTERNS = [
     (r"^\$2[aby]\$\d{2}\$.{53}$", (3200, "bcrypt", None)),
     (r"^\$6\$.{0,16}\$.{86}$", (1800, "sha512crypt", None)),
@@ -33,12 +32,44 @@ HASH_PATTERNS = [
     (r"^[a-fA-F0-9]{32}:[a-fA-F0-9]{32}$", (1000, "NTLM (with LM)", None)),
 ]
 
-# Formats that are never a single pasted string - always need an extraction
-# tool first and a --hashfile pointed at hashcat's own capture format.
 FILE_BASED_HINTS = {
     "WPA/WPA2 handshake": (22000, "Capture with airodump-ng, convert with hcxpcapngtool to .hc22000, then use --hashfile"),
     "KeePass .kdbx": (13400, "Run keepass2john file.kdbx > hash.txt, then use --hashfile hash.txt"),
 }
+
+CONFIG_DIR = Path.home() / ".hashwraith"
+CRACKED_LOG = CONFIG_DIR / "cracked.log"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+DEFAULT_CONFIG = {
+    "default_wordlist": None,
+    "default_rule": None,
+    "priority_wordlist": str(Path.home() / "wordlists" / "priority.txt"),
+}
+
+
+def ensure_dirs():
+    CONFIG_DIR.mkdir(exist_ok=True)
+    CRACKED_LOG.touch(exist_ok=True)
+
+
+def load_config():
+    ensure_dirs()
+    if CONFIG_FILE.exists():
+        try:
+            cfg = json.loads(CONFIG_FILE.read_text())
+            merged = DEFAULT_CONFIG.copy()
+            merged.update(cfg)
+            return merged
+        except json.JSONDecodeError:
+            print("[!] Config file is corrupted, using defaults.")
+            return DEFAULT_CONFIG.copy()
+    return DEFAULT_CONFIG.copy()
+
+
+def save_config(cfg):
+    ensure_dirs()
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
 
 def detect_hash_type(hash_string):
@@ -70,8 +101,6 @@ RULE_SEARCH_PATHS = [
     Path("/usr/share/john/rules"),
 ]
 
-PRIORITY_WORDLIST = Path.home() / "wordlists" / "priority.txt"
-
 
 def find_wordlists():
     found = []
@@ -94,15 +123,6 @@ def find_rules():
         if base.exists():
             found.extend(sorted(base.glob("*.rule")))
     return found
-
-
-CONFIG_DIR = Path.home() / ".hashwraith"
-CRACKED_LOG = CONFIG_DIR / "cracked.log"
-
-
-def ensure_dirs():
-    CONFIG_DIR.mkdir(exist_ok=True)
-    CRACKED_LOG.touch(exist_ok=True)
 
 
 def prompt_choice(prompt, options, allow_none=True):
@@ -143,9 +163,7 @@ def check_path_exists(path_str, label):
     return True
 
 
-def run_hashcat(target_file, mode, wordlist, rule, session_name, is_hashfile=False):
-    """target_file is either a single-hash temp file we wrote, or a
-    user-supplied --hashfile (e.g. from keepass2john / hcxpcapngtool)."""
+def run_hashcat(target_file, mode, wordlist, rule, session_name):
     if not check_path_exists(wordlist, "Wordlist"):
         return None
     if rule and not check_path_exists(rule, "Rule file"):
@@ -174,35 +192,35 @@ def run_hashcat(target_file, mode, wordlist, rule, session_name, is_hashfile=Fal
     return None
 
 
-def crack_single_hash(hash_value, mode, wordlist, rule, session_prefix, use_priority=True):
+def crack_single_hash(hash_value, mode, wordlist, rule, session_prefix, cfg, use_priority=True):
     hash_file = CONFIG_DIR / f"{session_prefix}_hash.txt"
     hash_file.write_text(hash_value + "\n")
 
-    if use_priority and PRIORITY_WORDLIST.exists():
-        print(f"[*] Trying priority list first ({PRIORITY_WORDLIST})...")
-        plain = run_hashcat(hash_file, mode, str(PRIORITY_WORDLIST), None, f"{session_prefix}_priority")
+    priority_path = cfg.get("priority_wordlist")
+    if use_priority and priority_path and Path(priority_path).exists():
+        print(f"[*] Trying priority list first ({priority_path})...")
+        plain = run_hashcat(hash_file, mode, priority_path, None, f"{session_prefix}_priority")
         if plain:
             return plain
         print("[*] Not in priority list, falling back to full wordlist...")
     elif use_priority:
-        print("[*] No priority list found, skipping straight to full wordlist.")
+        print("[*] No priority list configured/found, skipping straight to full wordlist.")
 
     return run_hashcat(hash_file, mode, wordlist, rule, session_prefix)
 
 
 def cmd_crack(args):
-    ensure_dirs()
+    cfg = load_config()
 
     if args.hashfile:
-        # File-based mode: WPA captures, KeePass exports, etc.
-        mode = args.mode or input("Enter hashcat mode number for this file (e.g. 22000 for WPA, 13400 for KeePass): ").strip()
-        wordlist = args.wordlist or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
-        rule = args.rule
+        mode = args.mode or input("Enter hashcat mode number for this file: ").strip()
+        wordlist = args.wordlist or cfg.get("default_wordlist") or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+        rule = args.rule or cfg.get("default_rule")
         if rule is None and not args.no_rule_prompt:
             chosen = prompt_choice("Select a rule file (optional):", find_rules(), allow_none=True)
             rule = str(chosen) if chosen else None
         session_name = args.session or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        run_hashcat(args.hashfile, mode, wordlist, rule, session_name, is_hashfile=True)
+        run_hashcat(args.hashfile, mode, wordlist, rule, session_name)
         return
 
     hash_value = args.hash or input("Enter the hash to crack: ").strip()
@@ -222,28 +240,27 @@ def cmd_crack(args):
             print("    use --hashfile instead of --hash (see README for extraction steps).")
             mode = input("Enter hashcat mode number manually: ").strip()
 
-    wordlist = args.wordlist
+    wordlist = args.wordlist or cfg.get("default_wordlist")
     if not wordlist:
-        chosen = prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False)
-        wordlist = str(chosen)
+        wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
 
-    rule = args.rule
+    rule = args.rule or cfg.get("default_rule")
     if rule is None and not args.no_rule_prompt:
         chosen = prompt_choice("Select a rule file (optional):", find_rules(), allow_none=True)
         rule = str(chosen) if chosen else None
 
     session_name = args.session or f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    crack_single_hash(hash_value, mode, wordlist, rule, session_name, use_priority=not args.no_priority)
+    crack_single_hash(hash_value, mode, wordlist, rule, session_name, cfg, use_priority=not args.no_priority)
 
 
 def cmd_batch(args):
-    ensure_dirs()
+    cfg = load_config()
     hashes = Path(args.file).read_text().splitlines()
     hashes = [h.strip() for h in hashes if h.strip()]
     print(f"[*] Loaded {len(hashes)} hashes from {args.file}")
 
-    wordlist = args.wordlist or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
-    rule = args.rule
+    wordlist = args.wordlist or cfg.get("default_wordlist") or str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+    rule = args.rule or cfg.get("default_rule")
 
     results = {}
     for i, h in enumerate(hashes, 1):
@@ -253,7 +270,7 @@ def cmd_batch(args):
         if mode is None:
             print("[!] Skipping - could not detect hash type and no --mode given")
             continue
-        plain = crack_single_hash(h, mode, wordlist, rule, f"batch_{i}")
+        plain = crack_single_hash(h, mode, wordlist, rule, f"batch_{i}", cfg)
         results[h] = plain
 
     if args.json_out:
@@ -296,22 +313,43 @@ def cmd_formats(args):
         print(f"           → {howto}")
 
 
+def cmd_config(args):
+    cfg = load_config()
+    if args.action == "show":
+        print(json.dumps(cfg, indent=2))
+    elif args.action == "set-wordlist":
+        cfg["default_wordlist"] = args.value
+        save_config(cfg)
+        print(f"[✓] Default wordlist set to: {args.value}")
+    elif args.action == "set-rule":
+        cfg["default_rule"] = args.value
+        save_config(cfg)
+        print(f"[✓] Default rule set to: {args.value}")
+    elif args.action == "set-priority":
+        cfg["priority_wordlist"] = args.value
+        save_config(cfg)
+        print(f"[✓] Priority wordlist set to: {args.value}")
+    elif args.action == "reset":
+        save_config(DEFAULT_CONFIG.copy())
+        print("[✓] Config reset to defaults.")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="hashwraith", description="A streamlined hashcat wrapper.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_crack = sub.add_parser("crack", help="Crack a single hash or hash file")
-    p_crack.add_argument("--hash", help="Paste a single hash string")
-    p_crack.add_argument("--hashfile", help="Path to a pre-extracted hash file (WPA/KeePass/etc)")
+    p_crack.add_argument("--hash")
+    p_crack.add_argument("--hashfile")
     p_crack.add_argument("--mode", type=int)
     p_crack.add_argument("--wordlist")
     p_crack.add_argument("--rule")
     p_crack.add_argument("--session")
     p_crack.add_argument("--no-rule-prompt", action="store_true")
-    p_crack.add_argument("--no-priority", action="store_true", help="Skip the fast priority-list pass")
+    p_crack.add_argument("--no-priority", action="store_true")
     p_crack.set_defaults(func=cmd_crack)
 
-    p_batch = sub.add_parser("batch", help="Crack every hash in a file (one per line)")
+    p_batch = sub.add_parser("batch", help="Crack every hash in a file")
     p_batch.add_argument("--file", required=True)
     p_batch.add_argument("--mode", type=int)
     p_batch.add_argument("--wordlist")
@@ -324,6 +362,11 @@ def main():
     sub.add_parser("rules", help="List discovered rule files").set_defaults(func=cmd_list_rules)
     sub.add_parser("gpu", help="Show detected GPU devices").set_defaults(func=cmd_gpu)
     sub.add_parser("formats", help="List all supported hash formats").set_defaults(func=cmd_formats)
+
+    p_config = sub.add_parser("config", help="View or set saved defaults")
+    p_config.add_argument("action", choices=["show", "set-wordlist", "set-rule", "set-priority", "reset"])
+    p_config.add_argument("value", nargs="?", help="Path value for set-* actions")
+    p_config.set_defaults(func=cmd_config)
 
     args = parser.parse_args()
     args.func(args)
