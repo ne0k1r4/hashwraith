@@ -3,11 +3,9 @@
 hashwraith - a hashcat wrapper for streamlined hash cracking workflows
 Author: Light
 
-Design philosophy: hashcat is powerful but low-level - every run means
-remembering mode numbers, wordlist paths, and rule files by hand. This
-wrapper adds a thin intelligence layer on top (auto-detection, discovery,
-sane defaults) without hiding or limiting what hashcat itself can do -
-every command still shells out to real hashcat underneath.
+Got tired of re-typing mode numbers and hunting for wordlist paths every
+time, so this exists. Everything still shells out to real hashcat under
+the hood - this just adds auto-detection and sane defaults on top of it.
 """
 
 import re
@@ -159,10 +157,9 @@ def detect_hash_type(hash_string):
 
 
 def check_gpu():
-    """Query hashcat's own device list (`hashcat -I`) rather than
-    inspecting the system directly (e.g. via lspci) - this way we report
-    exactly what hashcat itself can see and will actually use, including
-    cases where a GPU exists but lacks a working OpenCL/CUDA runtime."""
+    # querying hashcat directly instead of lspci - if hashcat can't see
+    # the GPU (missing OpenCL runtime etc) there's no point reporting
+    # hardware that's there but unusable
     try:
         result = subprocess.run(["hashcat", "-I"], capture_output=True, text=True, timeout=15)
         devices = []
@@ -221,10 +218,8 @@ def find_rules():
 
 
 def prompt_choice(prompt, options, allow_none=True):
-    """Generic numbered-menu prompt used by every interactive selection
-    in the tool (wordlist, rule, hash-type-ambiguity, mask). Centralized
-    here so every prompt behaves identically rather than each command
-    rolling its own input-validation loop."""
+    # every interactive menu in this tool goes through here, saves
+    # rewriting the same input-validation loop five times
     if not options:
         print(f"[!] No options found for: {prompt}")
         return None
@@ -243,10 +238,8 @@ def prompt_choice(prompt, options, allow_none=True):
 
 
 def log_cracked(hash_type, hash_value, plaintext):
-    """Append-only log of every successful crack, timestamped. Intentionally
-    plain-text and append-only rather than a database - this is meant to
-    be human-readable (`cat ~/.hashwraith/cracked.log`) and safe to append
-    to concurrently without any locking complexity."""
+    # plaintext + append-only on purpose, don't need a db for this and
+    # it's nice being able to just cat the file
     with open(CRACKED_LOG, "a") as f:
         f.write(f"{datetime.now().isoformat()} | {hash_type} | {hash_value} | {plaintext}\n")
 
@@ -468,8 +461,7 @@ def cmd_batch(args):
 
 
 def cmd_benchmark(args):
-    """Thin passthrough to hashcat's own -b benchmark - no need to
-    reimplement what hashcat already does well."""
+    # not reinventing hashcat's own benchmark, just passing through
     subprocess.run(["hashcat", "-b"])
 
 
@@ -497,8 +489,7 @@ def cmd_gpu(args):
 
 
 def cmd_formats(args):
-    """Documentation command - lists every auto-detectable format plus
-    the file-based ones that need external extraction tools first."""
+    # just a docs command, lists what we can auto-detect + the file-based stuff
     print("Supported hash formats (auto-detected from a pasted string):\n")
     for pattern, (mode, name, note) in HASH_PATTERNS:
         note_str = f"  [{note}]" if note else ""
@@ -510,9 +501,8 @@ def cmd_formats(args):
 
 
 def cmd_sessions(args):
-    """List hashcat restore files (interrupted sessions that can be
-    resumed). Reads HASHCAT_SESSIONS_DIR, not our own CONFIG_DIR - see
-    the comment on that constant above for why."""
+    # reads HASHCAT_SESSIONS_DIR not our own config dir - see the note
+    # up top about hashcat ignoring --potfile-path for restore stuff
     if not HASHCAT_SESSIONS_DIR.exists():
         print("No resumable sessions found.")
         return
@@ -527,8 +517,7 @@ def cmd_sessions(args):
 
 
 def cmd_config(args):
-    """View or persist default wordlist/rule/priority-list choices so
-    they don't need to be re-typed or re-selected on every single run."""
+    # persists defaults so I'm not picking the same wordlist every time
     cfg = load_config()
     if args.action == "show":
         print(json.dumps(cfg, indent=2))
@@ -668,6 +657,9 @@ def analyze_wordlist(path, sample_size=500000):
 
 
 def cmd_stats(args):
+    # sampling logic works fine but the pattern_names dict below is
+    # incomplete - only covers the common combos, rare ones just print
+    # the raw letter code. good enough for now
     path = args.wordlist
     if not check_path_exists(path, "Wordlist"):
         return
@@ -833,6 +825,9 @@ def cmd_auto(args):
 # mode/type, hence requiring --mode explicitly rather than per-line
 # auto-detection like the old batch command does.
 def cmd_multibatch(args):
+    # TODO: this requires the same --mode for every hash in the file,
+    # would be nice to auto-group by detected type and run one hashcat
+    # pass per group instead of forcing the user to pre-sort them
     ensure_dirs()
     cfg = load_config()
 
