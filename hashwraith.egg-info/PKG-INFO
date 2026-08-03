@@ -4,13 +4,22 @@ Version: 0.1.0
 Summary: A hashcat wrapper that streamlines hash cracking workflows
 Author: Light
 License: MIT
-Keywords: hashcat,password-cracking,security,ctf,pentesting
+Project-URL: Repository, https://github.com/ne0k1r4/hashwraith
+Project-URL: Issues, https://github.com/ne0k1r4/hashwraith/issues
+Keywords: hashcat,password-cracking,security,ctf,pentesting,hash-cracking,wordlist
 Classifier: Development Status :: 4 - Beta
 Classifier: Environment :: Console
 Classifier: Intended Audience :: Information Technology
 Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: POSIX :: Linux
 Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
 Classifier: Topic :: Security
+Classifier: Topic :: Utilities
 Requires-Python: >=3.8
 Description-Content-Type: text/markdown
 License-File: LICENSE
