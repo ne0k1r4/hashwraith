@@ -740,10 +740,17 @@ def cmd_stats(args):
 # A third distinct attack surface alongside dictionary+rules and mask
 # attacks: useful specifically for compound patterns that neither of the
 # other two modes are well-suited to generate on their own.
-def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name):
+def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name, rule1=None, rule2=None):
+    """rule1/rule2 map to hashcat's -j/-k flags - applies a rule to each
+    side of the combination BEFORE combining, e.g. capitalize every word
+    from list1 (-j) while appending digits to every word from list2 (-k)."""
     potfile = CONFIG_DIR / f"{session_name}.pot"
     cmd = ["hashcat", "-m", str(mode), "-a", "1", str(target_file), wordlist1, wordlist2,
            "--session", session_name, "--potfile-path", str(potfile)]
+    if rule1:
+        cmd += ["-j", rule1]
+    if rule2:
+        cmd += ["-k", rule2]
     info(f"Running combinator attack: {' '.join(cmd)}")
     if DRY_RUN:
         info("(dry run - not actually executing)")
@@ -780,7 +787,8 @@ def cmd_combinator(args):
     hash_file = CONFIG_DIR / f"combo_{datetime.now().strftime('%Y%m%d_%H%M%S')}_hash.txt"
     hash_file.write_text(hash_value + "\n")
     session_name = args.session or f"combo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    run_combinator_attack(hash_file, mode, wordlist1, wordlist2, session_name)
+    run_combinator_attack(hash_file, mode, wordlist1, wordlist2, session_name,
+                           rule1=args.rule1, rule2=args.rule2)
 
 
 # ─── Auto escalation mode ───────────────────────────────────────────────
@@ -1066,6 +1074,8 @@ def main():
     p_combo.add_argument("--mode", type=int)
     p_combo.add_argument("--wordlist1", help="Prefix wordlist")
     p_combo.add_argument("--wordlist2", help="Suffix wordlist")
+    p_combo.add_argument("--rule1", help="hashcat rule applied to wordlist1 before combining (-j)")
+    p_combo.add_argument("--rule2", help="hashcat rule applied to wordlist2 before combining (-k)")
     p_combo.add_argument("--session")
     p_combo.set_defaults(func=cmd_combinator)
 
