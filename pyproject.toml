@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.scripts]
-hashwraith = "hashwraith_pkg:main"
+hashwraith = "hashwraith_pkg:cli"
 
 [tool.setuptools]
 packages = ["hashwraith_pkg"]

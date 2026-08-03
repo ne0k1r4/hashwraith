@@ -267,13 +267,54 @@ def check_path_exists(path_str, label):
     return True
 
 
+# ─── Shared potfile parsing ─────────────────────────────────────────────
+# Every run_* function below used to have its own copy-pasted "read the
+# potfile, split on the last colon" logic. Consolidated here after a real
+# bug: a patch updated three of the four copies but silently missed one,
+# and it went unnoticed until a test caught it. One implementation now,
+# used everywhere - if it's wrong, it's wrong in exactly one place.
+def read_last_potfile_result(potfile):
+    """Read a potfile and return (hash, plaintext) for the LAST cracked
+    entry, or (None, None) if nothing's there. 'Last', not 'any', matters
+    when a session name gets reused and the potfile accumulates more than
+    one result over time."""
+    if not potfile.exists():
+        return None, None
+    content = potfile.read_text().strip()
+    if not content:
+        return None, None
+    last_line = content.splitlines()[-1]
+    if ":" not in last_line:
+        return None, None
+    h, plain = last_line.split(":", 1)
+    return h, plain
+
+
+def read_all_potfile_results(potfile):
+    """Same idea but returns every cracked (hash, plaintext) pair, not
+    just the last one - used by multi-hash mode where a single hashcat
+    run can crack several hashes in one potfile."""
+    if not potfile.exists():
+        return []
+    content = potfile.read_text().strip()
+    if not content:
+        return []
+    results = []
+    for line in content.splitlines():
+        if ":" in line:
+            h, plain = line.split(":", 1)
+            results.append((h, plain))
+    return results
+
+
 def run_hashcat(target_file, mode, wordlist, rule, session_name):
     """Core dictionary-attack (-a 0) invocation. Every other attack mode
     (mask, combinator) has its own similar run_* function rather than
     trying to force every hashcat attack mode through one shared function -
     the -a modes take different positional arguments (one wordlist vs
     two vs a mask string), so keeping them separate is more readable than
-    one function with a pile of conditional argument-building logic."""
+    one function with a pile of conditional argument-building logic.
+    Potfile parsing itself IS shared though - see read_last_potfile_result."""
     if not check_path_exists(wordlist, "Wordlist"):
         return None
     if rule and not check_path_exists(rule, "Rule file"):
@@ -293,19 +334,11 @@ def run_hashcat(target_file, mode, wordlist, rule, session_name):
         return None
     subprocess.run(cmd)
 
-    if potfile.exists():
-        content = potfile.read_text().strip()
-        if content:
-            # Read the LAST line, not just any line containing ":" - matters
-            # for batch mode, where a session name gets reused across
-            # multiple hashes and the potfile can accumulate more than one
-            # result. The most recent crack is always what we just ran for.
-            last_line = content.splitlines()[-1]
-            if ":" in last_line:
-                h, plain = last_line.split(":", 1)
-                print(f"\n[✓] CRACKED: {plain}")
-                log_cracked(mode, h, plain)
-                return plain
+    h, plain = read_last_potfile_result(potfile)
+    if plain:
+        print(f"\n[✓] CRACKED: {plain}")
+        log_cracked(mode, h, plain)
+        return plain
     return None
 
 
@@ -358,14 +391,10 @@ def cmd_crack(args):
         cmd = ["hashcat", "--session", args.restore, "--restore"]
         subprocess.run(cmd)
         potfile = CONFIG_DIR / f"{args.restore}.pot"
-        if potfile.exists():
-            content_pot = potfile.read_text().strip()
-            if content_pot:
-                last_line = content_pot.splitlines()[-1]
-                if ":" in last_line:
-                    h, plain = last_line.split(":", 1)
-                    ok(f"CRACKED: {plain}")
-                    log_cracked("restored", h, plain)
+        h, plain = read_last_potfile_result(potfile)
+        if plain:
+            ok(f"CRACKED: {plain}")
+            log_cracked("restored", h, plain)
         return
 
     if args.hashfile:
@@ -435,7 +464,8 @@ def cmd_batch(args):
     hashcat session (batch_1, batch_2, ...) rather than combining them
     into a single hashcat run - simpler to reason about progress and
     results per-hash, at the cost of not sharing GPU warm-up time across
-    hashes. Fine tradeoff for typical batch sizes (dozens, not millions)."""
+    hashes. Fine tradeoff for typical batch sizes (dozens, not millions).
+    For same-type hashes at real scale, use 'multibatch' instead."""
     cfg = load_config()
     hashes = Path(args.file).read_text().splitlines()
     hashes = [h.strip() for h in hashes if h.strip()]
@@ -573,15 +603,11 @@ def run_mask_attack(target_file, mode, mask, session_name):
         info("(dry run - not actually executing)")
         return None
     subprocess.run(cmd)
-    if potfile.exists():
-        content = potfile.read_text().strip()
-        if content:
-            last_line = content.splitlines()[-1]
-            if ":" in last_line:
-                h, plain = last_line.split(":", 1)
-                ok(f"CRACKED: {plain}")
-                log_cracked(mode, h, plain)
-                return plain
+    h, plain = read_last_potfile_result(potfile)
+    if plain:
+        ok(f"CRACKED: {plain}")
+        log_cracked(mode, h, plain)
+        return plain
     return None
 
 
@@ -723,15 +749,11 @@ def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name)
         info("(dry run - not actually executing)")
         return None
     subprocess.run(cmd)
-    if potfile.exists():
-        content = potfile.read_text().strip()
-        if content:
-            last_line = content.splitlines()[-1]
-            if ":" in last_line:
-                h, plain = last_line.split(":", 1)
-                ok(f"CRACKED: {plain}")
-                log_cracked(mode, h, plain)
-                return plain
+    h, plain = read_last_potfile_result(potfile)
+    if plain:
+        ok(f"CRACKED: {plain}")
+        log_cracked(mode, h, plain)
+        return plain
     return None
 
 
@@ -759,7 +781,6 @@ def cmd_combinator(args):
     hash_file.write_text(hash_value + "\n")
     session_name = args.session or f"combo_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_combinator_attack(hash_file, mode, wordlist1, wordlist2, session_name)
-
 
 
 # ─── Auto escalation mode ───────────────────────────────────────────────
@@ -817,6 +838,8 @@ def cmd_auto(args):
     info("=== Stage 3/3: common mask patterns ===")
     for name, pattern in COMMON_MASKS.items():
         info(f"Trying mask: {name} ({pattern})")
+        # NOTE: session name gets ugly for long mask names with spaces -
+        # see TODO.md, cosmetic issue, not worth fixing right now
         plain = run_mask_attack(hash_file, mode, pattern, f"{session_base}_mask_{name.replace(chr(32), chr(95))[:20]}")
         if plain:
             ok(f"Cracked at Stage 3 (mask: {name}): {plain}")
@@ -825,16 +848,13 @@ def cmd_auto(args):
     err("Not cracked by any stage. Consider: a larger wordlist, --hashfile for WPA/KeePass, or a custom --mask.")
 
 
-
 # ─── Native multi-hash batch cracking ───────────────────────────────────
-# cmd_batch() above loops one hash at a time - simple, but wasteful: each
-# hash pays its own GPU warm-up, wordlist-load, and rule-compile cost from
-# scratch. hashcat natively supports cracking MANY hashes of the same type
-# in a single invocation (just pass a file with one hash per line) - the
-# GPU loads the wordlist/rules ONCE and tests every hash against every
-# candidate in the same pass. Only works when every hash shares the same
-# mode/type, hence requiring --mode explicitly rather than per-line
-# auto-detection like the old batch command does.
+# cmd_batch() loops one hash at a time - simple, but wasteful: each hash
+# pays its own GPU warm-up, wordlist-load, and rule-compile cost from
+# scratch. hashcat natively supports cracking MANY hashes in one pass if
+# they're the same type - loads the wordlist/rules ONCE and tests every
+# hash against every candidate together. If no --mode is given, hashes
+# get auto-detected and grouped by type, one hashcat pass per group.
 def _run_multibatch_group(hash_lines, mode, wordlist, rule, session_name, json_results):
     group_file = CONFIG_DIR / f"{session_name}_hashes.txt"
     group_file.write_text("\n".join(hash_lines) + "\n")
@@ -848,16 +868,14 @@ def _run_multibatch_group(hash_lines, mode, wordlist, rule, session_name, json_r
         info("(dry run - not actually executing)")
         return
     subprocess.run(cmd)
-    if potfile.exists():
-        content = potfile.read_text().strip()
-        lines = [l for l in content.splitlines() if ":" in l]
-        ok(f"Cracked {len(lines)} of {len(hash_lines)} hash(es) in mode {mode}:")
-        for line in lines:
-            h, plain = line.split(":", 1)
-            print(f"  {h} -> {plain}")
-            log_cracked(mode, h, plain)
-            json_results[h] = plain
-    else:
+
+    results = read_all_potfile_results(potfile)
+    ok(f"Cracked {len(results)} of {len(hash_lines)} hash(es) in mode {mode}:")
+    for h, plain in results:
+        print(f"  {h} -> {plain}")
+        log_cracked(mode, h, plain)
+        json_results[h] = plain
+    if not results:
         warn(f"No potfile produced for mode {mode} group - nothing cracked, or hashcat failed to run.")
 
 
@@ -898,7 +916,6 @@ def cmd_multibatch(args):
     if args.json_out:
         Path(args.json_out).write_text(json.dumps(json_results, indent=2))
         info(f"Results exported to {args.json_out}")
-
 
 
 # ─── Cracked-hash history/search ────────────────────────────────────────
@@ -1025,5 +1042,17 @@ def main():
     args.func(args)
 
 
+def cli():
+    """Entry point wrapper - catches Ctrl+C cleanly instead of dumping a
+    raw traceback. A long mask/wordlist attack can run for minutes, and
+    interrupting it shouldn't look like the tool crashed."""
+    try:
+        main()
+    except KeyboardInterrupt:
+        print()
+        warn("Interrupted. If a hashcat session was running, it may be resumable - check 'hashwraith sessions'.")
+        sys.exit(130)
+
+
 if __name__ == "__main__":
-    main()
+    cli()
