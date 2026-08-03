@@ -1061,6 +1061,41 @@ def cmd_show(args):
     else:
         warn(f"'{args.hash}' not found in cracked-hash history. Not previously cracked (by this tool).")
 
+def cmd_merge(args):
+    """Merges/dedupes wordlists via the system sort -u rather than
+    reimplementing dedup in Python - for multi-GB wordlists, GNU sort's
+    external merge sort is vastly more memory-efficient. -S caps sort's
+    memory buffer (a run with no cap once pushed a 7GB machine into
+    swap), -T points temp files at real disk instead of a small
+    RAM-backed /tmp."""
+    ensure_dirs()
+    for f in args.files:
+        if not check_path_exists(f, "Input wordlist"):
+            return
+
+    tmp_dir = args.tmp_dir or str(CONFIG_DIR / "merge_tmp")
+    Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+
+    cmd = ["sort", "-u", "-T", tmp_dir, "-S", args.memory] + args.files + ["-o", args.output]
+    info(f"Merging {len(args.files)} wordlist(s) -> {args.output}")
+    info(f"Running: {' '.join(cmd)}")
+    if DRY_RUN:
+        info("(dry run - not actually executing)")
+        return
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        err(f"sort exited with code {result.returncode} - check disk space and paths above.")
+        return
+
+    out_path = Path(args.output)
+    if out_path.exists():
+        line_count = sum(1 for _ in open(out_path, errors="ignore"))
+        size = out_path.stat().st_size
+        unit = f"{size / (1024**3):.2f} GB" if size > 10**8 else f"{size/1024:.1f} KB"
+        ok(f"Merged into {args.output}: {line_count:,} unique lines, {unit}")
+
+
 
 def main():
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
@@ -1153,6 +1188,13 @@ def main():
     p_auto.add_argument("--rule")
     p_auto.add_argument("--session")
     p_auto.set_defaults(func=cmd_auto)
+
+    p_merge = sub.add_parser("merge", help="Merge and deduplicate multiple wordlists into one")
+    p_merge.add_argument("files", nargs="+", help="Two or more wordlist files to merge")
+    p_merge.add_argument("--output", required=True, help="Path to write the merged, deduplicated result")
+    p_merge.add_argument("--memory", default="1G", help="Cap sort's in-memory buffer, e.g. 1G, 512M")
+    p_merge.add_argument("--tmp-dir", help="Directory for sort's temp files - defaults to ~/.hashwraith/merge_tmp")
+    p_merge.set_defaults(func=cmd_merge)
 
     p_show = sub.add_parser("show", help="Check if a hash was already cracked, without re-running hashcat")
     p_show.add_argument("--hash", help="Hash to look up in cracked-hash history")
