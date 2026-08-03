@@ -836,11 +836,9 @@ def cmd_auto(args):
         warn("No wordlist given/configured, skipping stage 2.")
 
     info("=== Stage 3/3: common mask patterns ===")
-    for name, pattern in COMMON_MASKS.items():
+    for i, (name, pattern) in enumerate(COMMON_MASKS.items(), 1):
         info(f"Trying mask: {name} ({pattern})")
-        # NOTE: session name gets ugly for long mask names with spaces -
-        # see TODO.md, cosmetic issue, not worth fixing right now
-        plain = run_mask_attack(hash_file, mode, pattern, f"{session_base}_mask_{name.replace(chr(32), chr(95))[:20]}")
+        plain = run_mask_attack(hash_file, mode, pattern, f"{session_base}_mask{i}")
         if plain:
             ok(f"Cracked at Stage 3 (mask: {name}): {plain}")
             return
