@@ -948,6 +948,68 @@ def cmd_history(args):
     print(f"\n{len(lines)} entr{'y' if len(lines) == 1 else 'ies'} shown.")
 
 
+
+# ─── Hybrid attacks (-a 6 / -a 7) ────────────────────────────────────────
+# Bridges dictionary and mask attacks: append (-a 6) or prepend (-a 7) a
+# brute-force mask to every word in a wordlist. Catches patterns like
+# "any rockyou word + 3 random digits" WITHOUT needing a pre-built suffix
+# wordlist the way combinator does - the mask covers the whole space
+# procedurally. Genuinely a third distinct attack surface, not a
+# reshuffling of combinator/mask.
+def run_hybrid_attack(target_file, mode, wordlist, mask, direction, session_name):
+    """direction: 6 = wordlist+mask (append), 7 = mask+wordlist (prepend)"""
+    potfile = CONFIG_DIR / f"{session_name}.pot"
+    if direction == 6:
+        cmd = ["hashcat", "-m", str(mode), "-a", "6", str(target_file), wordlist, mask,
+               "--session", session_name, "--potfile-path", str(potfile)]
+    else:
+        cmd = ["hashcat", "-m", str(mode), "-a", "7", str(target_file), mask, wordlist,
+               "--session", session_name, "--potfile-path", str(potfile)]
+    info(f"Running hybrid attack (-a {direction}): {' '.join(cmd)}")
+    if DRY_RUN:
+        info("(dry run - not actually executing)")
+        return None
+    subprocess.run(cmd)
+    h, plain = read_last_potfile_result(potfile)
+    if plain:
+        ok(f"CRACKED: {plain}")
+        log_cracked(mode, h, plain)
+        return plain
+    return None
+
+
+def cmd_hybrid(args):
+    ensure_dirs()
+    cfg = load_config()
+    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+
+    mode = args.mode
+    if mode is None:
+        candidates = detect_hash_type(hash_value)
+        if candidates:
+            mode = candidates[0][0]
+            info(f"Detected hash type: {candidates[0][1]} (hashcat mode {mode})")
+        else:
+            mode = input("Enter hashcat mode number manually: ").strip()
+
+    wordlist = args.wordlist or cfg.get("default_wordlist")
+    if not wordlist:
+        wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
+
+    mask = args.mask
+    if not mask:
+        labels = list(COMMON_MASKS.keys())
+        choice = prompt_choice("Select a mask to combine with the wordlist:", labels, allow_none=False)
+        mask = COMMON_MASKS[choice]
+
+    direction = 7 if args.prepend else 6
+
+    hash_file = CONFIG_DIR / f"hybrid_{datetime.now().strftime('%Y%m%d_%H%M%S')}_hash.txt"
+    hash_file.write_text(hash_value + "\n")
+    session_name = args.session or f"hybrid_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    run_hybrid_attack(hash_file, mode, wordlist, mask, direction, session_name)
+
+
 def main():
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
     mode or a piece of tool-management functionality - see each cmd_*
@@ -1020,6 +1082,15 @@ def main():
     p_multibatch.add_argument("--session")
     p_multibatch.add_argument("--json-out")
     p_multibatch.set_defaults(func=cmd_multibatch)
+
+    p_hybrid = sub.add_parser("hybrid", help="Combine a wordlist with a mask (-a 6 append / -a 7 prepend)")
+    p_hybrid.add_argument("--hash")
+    p_hybrid.add_argument("--mode", type=int)
+    p_hybrid.add_argument("--wordlist")
+    p_hybrid.add_argument("--mask", help="Mask to append (default) or prepend, e.g. ?d?d?d")
+    p_hybrid.add_argument("--prepend", action="store_true", help="Prepend the mask instead of appending it (-a 7 instead of -a 6)")
+    p_hybrid.add_argument("--session")
+    p_hybrid.set_defaults(func=cmd_hybrid)
 
     p_auto = sub.add_parser("auto", help="Try every attack strategy in escalating order, stop at first success")
     p_auto.add_argument("--hash")
