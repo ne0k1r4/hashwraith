@@ -307,14 +307,19 @@ def read_all_potfile_results(potfile):
     return results
 
 
-def run_hashcat(target_file, mode, wordlist, rule, session_name):
+def run_hashcat(target_file, mode, wordlist, rule, session_name, debug_file=None):
     """Core dictionary-attack (-a 0) invocation. Every other attack mode
     (mask, combinator) has its own similar run_* function rather than
     trying to force every hashcat attack mode through one shared function -
     the -a modes take different positional arguments (one wordlist vs
     two vs a mask string), so keeping them separate is more readable than
     one function with a pile of conditional argument-building logic.
-    Potfile parsing itself IS shared though - see read_last_potfile_result."""
+    Potfile parsing itself IS shared though - see read_last_potfile_result.
+
+    debug_file (optional): when set alongside a rule, passes hashcat
+    --debug-mode=4 --debug-file so it logs which SPECIFIC rule cracked
+    each hash - used by the rules-report command to show which rules in
+    a ruleset actually contribute cracks vs which never fire."""
     if not check_path_exists(wordlist, "Wordlist"):
         return None
     if rule and not check_path_exists(rule, "Rule file"):
@@ -327,6 +332,8 @@ def run_hashcat(target_file, mode, wordlist, rule, session_name):
            "--session", session_name, "--potfile-path", str(potfile)]
     if rule:
         cmd += ["-r", rule]
+        if debug_file:
+            cmd += ["--debug-mode", "4", "--debug-file", str(debug_file)]
 
     print(f"\n[*] Running: {' '.join(cmd)}\n")
     if DRY_RUN:
@@ -1061,6 +1068,67 @@ def cmd_show(args):
     else:
         warn(f"'{args.hash}' not found in cracked-hash history. Not previously cracked (by this tool).")
 
+
+# ─── Rule effectiveness report ──────────────────────────────────────────
+# hashcat's --debug-mode 4 logs which specific RULE produced each modified
+# candidate, written to --debug-file. Parsing that tells you which rules
+# in a ruleset actually contribute vs which never fire for a given
+# wordlist+hash combo - useful for trimming down a huge ruleset to just
+# the parts that matter for your actual targets.
+def cmd_rules_report(args):
+    ensure_dirs()
+    hash_value = args.hash or input("Enter the hash to crack: ").strip()
+
+    mode = args.mode
+    if mode is None:
+        candidates = detect_hash_type(hash_value)
+        if candidates:
+            mode = candidates[0][0]
+            info(f"Detected hash type: {candidates[0][1]} (hashcat mode {mode})")
+        else:
+            mode = input("Enter hashcat mode number manually: ").strip()
+
+    wordlist = args.wordlist
+    if not check_path_exists(args.rule, "Rule file"):
+        return
+
+    hash_file = CONFIG_DIR / f"rulesreport_{datetime.now().strftime('%Y%m%d_%H%M%S')}_hash.txt"
+    hash_file.write_text(hash_value + "\n")
+    session_name = args.session or f"rulesreport_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    debug_file = CONFIG_DIR / f"{session_name}_debug.txt"
+
+    plain = run_hashcat(hash_file, mode, wordlist, args.rule, session_name, debug_file=debug_file)
+
+    if not debug_file.exists():
+        warn("No debug file produced - hashcat may have exited early or found nothing.")
+        return
+
+    lines = [l for l in debug_file.read_text().splitlines() if l.strip()]
+    info(f"{len(lines)} rule application(s) logged.")
+
+    # hashcat's --debug-mode 4 format is colon-separated:
+    # original_word:rule:transformed_word - and it ONLY logs a line when
+    # the transformed word actually matched the target hash, not every
+    # rule application tried. Confirmed by testing, not assumed.
+    if plain:
+        ok(f"Hash cracked: {plain}")
+        winner = None
+        for line in lines:
+            parts = line.split(":")
+            if len(parts) >= 3 and parts[2] == plain:
+                winner = parts[1]
+                break
+        if winner:
+            ok(f"Rule that cracked it: {winner}")
+        else:
+            warn("Cracked, but couldn't isolate the exact rule from the debug log.")
+    else:
+        warn("Not cracked with this wordlist/rule combo.")
+
+    if args.show_all:
+        print("\nLogged matches (original:rule:result):")
+        for line in lines[:args.show_all]:
+            print(f"  {line}")
 def cmd_merge(args):
     """Merges/dedupes wordlists via the system sort -u rather than
     reimplementing dedup in Python - for multi-GB wordlists, GNU sort's
@@ -1195,6 +1263,15 @@ def main():
     p_merge.add_argument("--memory", default="1G", help="Cap sort's in-memory buffer, e.g. 1G, 512M")
     p_merge.add_argument("--tmp-dir", help="Directory for sort's temp files - defaults to ~/.hashwraith/merge_tmp")
     p_merge.set_defaults(func=cmd_merge)
+
+    p_rules_report = sub.add_parser("rules-report", help="Crack with a rule and report which specific rule cracked it")
+    p_rules_report.add_argument("--hash")
+    p_rules_report.add_argument("--mode", type=int)
+    p_rules_report.add_argument("--wordlist", required=True)
+    p_rules_report.add_argument("--rule", required=True)
+    p_rules_report.add_argument("--session")
+    p_rules_report.add_argument("--show-all", type=int, metavar="N", help="Also print the first N logged rule applications")
+    p_rules_report.set_defaults(func=cmd_rules_report)
 
     p_show = sub.add_parser("show", help="Check if a hash was already cracked, without re-running hashcat")
     p_show.add_argument("--hash", help="Hash to look up in cracked-hash history")
