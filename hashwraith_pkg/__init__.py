@@ -15,6 +15,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Optional, List, Tuple, Dict, Any
 
 
 # ─── Terminal colors (plain ANSI, no external deps) ────────────────────
@@ -29,24 +30,24 @@ class C:
     RESET = "\033[0m"
 
 
-def info(msg):
+def info(msg: str) -> None:
     """Neutral status message - cyan [*]."""
     print(f"{C.CYAN}[*]{C.RESET} {msg}")
 
 
-def ok(msg):
+def ok(msg: str) -> None:
     """Success message - green [✓], bolded so a crack result stands out
     even when scrolled past a wall of hashcat's own verbose output."""
     print(f"{C.GREEN}{C.BOLD}[✓]{C.RESET} {msg}")
 
 
-def warn(msg):
+def warn(msg: str) -> None:
     """Non-fatal problem - yellow [!]. Used for things like a missing
     optional file, not something that stops execution."""
     print(f"{C.YELLOW}[!]{C.RESET} {msg}")
 
 
-def err(msg):
+def err(msg: str) -> None:
     """Fatal problem - red [✗]. Always paired with sys.exit(1) at the
     call site; this function itself never exits, just prints."""
     print(f"{C.RED}[✗]{C.RESET} {msg}")
@@ -59,7 +60,7 @@ def err(msg):
 # over a more specific match further down the list. Kept as simple regex
 # rather than a full hash-identification library (like hashid) on purpose:
 # no dependency, easy to read, easy to extend with one more tuple.
-HASH_PATTERNS = [
+HASH_PATTERNS: List[Tuple[str, Tuple[int, str, Optional[str]]]] = [
     (r"^\$2[aby]\$\d{2}\$.{53}$", (3200, "bcrypt", None)),
     (r"^\$6\$.{0,16}\$.{86}$", (1800, "sha512crypt", None)),
     (r"^\$5\$.{0,16}\$.{43}$", (7400, "sha256crypt", None)),
@@ -86,7 +87,7 @@ HASH_PATTERNS = [
 # databases are binary files that need a separate extraction tool first
 # (hcxpcapngtool, keepass2john). Listed here purely for the `formats`
 # command's documentation output; detect_hash_type() never matches these.
-FILE_BASED_HINTS = {
+FILE_BASED_HINTS: Dict[str, Tuple[int, str]] = {
     "WPA/WPA2 handshake": (22000, "Capture with airodump-ng, convert with hcxpcapngtool to .hc22000, then use --hashfile"),
     "KeePass .kdbx": (13400, "Run keepass2john file.kdbx > hash.txt, then use --hashfile hash.txt"),
 }
@@ -97,14 +98,14 @@ FILE_BASED_HINTS = {
 # its own default location (see HASHCAT_SESSIONS_DIR below) regardless of
 # --potfile-path; that was a real bug caught during testing, not a design
 # choice - hashcat's --restore mechanism ignores custom paths entirely.
-DRY_RUN = False  # set by --dry-run, checked in every run_* function before subprocess.run
+DRY_RUN: bool = False  # set by --dry-run, checked in every run_* function before subprocess.run
 
 CONFIG_DIR = Path.home() / ".hashwraith"
 CRACKED_LOG = CONFIG_DIR / "cracked.log"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HASHCAT_SESSIONS_DIR = Path.home() / ".local" / "share" / "hashcat" / "sessions"
 
-DEFAULT_CONFIG = {
+DEFAULT_CONFIG: Dict[str, Optional[str]] = {
     "default_wordlist": None,
     "default_rule": None,
     # A small, frequency-ranked wordlist tried BEFORE the big exhaustive
@@ -117,7 +118,7 @@ DEFAULT_CONFIG = {
 }
 
 
-def ensure_dirs():
+def ensure_dirs() -> None:
     """Create ~/.hashwraith/ and touch the cracked-hash log if missing.
     Called defensively at the top of most commands rather than assuming
     a previous run already set things up."""
@@ -125,7 +126,7 @@ def ensure_dirs():
     CRACKED_LOG.touch(exist_ok=True)
 
 
-def load_config():
+def load_config() -> Dict[str, Any]:
     """Load saved defaults, falling back to DEFAULT_CONFIG for any key
     that's missing or if the file is corrupted. Never raises - a broken
     config file should degrade to defaults, not crash the whole tool."""
@@ -142,12 +143,12 @@ def load_config():
     return DEFAULT_CONFIG.copy()
 
 
-def save_config(cfg):
+def save_config(cfg: Dict[str, Any]) -> None:
     ensure_dirs()
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
 
-def detect_hash_type(hash_string):
+def detect_hash_type(hash_string: str) -> List[Tuple[int, str]]:
     """Return every HASH_PATTERNS entry that matches the given string,
     as a list of (mode, name) tuples. Deliberately returns ALL matches,
     not just the first - some hash lengths are genuinely ambiguous
@@ -158,20 +159,39 @@ def detect_hash_type(hash_string):
     return [(m, n) for pattern, (m, n, note) in HASH_PATTERNS if re.match(pattern, hash_string)]
 
 
-def check_gpu():
+# ─── Shared hashcat/subprocess invocation ───────────────────────────────
+# Every run_* function shells out to hashcat (or sort, for merge). If
+# hashcat isn't installed at all, a bare subprocess.run(["hashcat", ...])
+# raises FileNotFoundError with a raw traceback - not the kind of error a
+# CLI tool should show. Consolidated here so "hashcat not found" is
+# handled once, consistently, everywhere it's invoked - not just in
+# check_gpu() (which used to be the only place that caught it).
+def run_subprocess(cmd: List[str], **kwargs: Any) -> Optional[subprocess.CompletedProcess]:
+    """Wraps subprocess.run with a clean error message if the binary
+    (hashcat, sort, etc.) isn't found on PATH, instead of a raw traceback.
+    Returns None on failure so callers can bail out cleanly."""
+    try:
+        return subprocess.run(cmd, **kwargs)
+    except FileNotFoundError:
+        binary = cmd[0] if cmd else "command"
+        err(f"'{binary}' not found on PATH.")
+        if binary == "hashcat":
+            print("    Install it: sudo pacman -S hashcat")
+        return None
+
+
+def check_gpu() -> List[str]:
     # querying hashcat directly instead of lspci - if hashcat can't see
     # the GPU (missing OpenCL runtime etc) there's no point reporting
     # hardware that's there but unusable
-    try:
-        result = subprocess.run(["hashcat", "-I"], capture_output=True, text=True, timeout=15)
-        devices = []
-        for line in result.stdout.splitlines():
-            if "Name" in line and "..." in line:
-                devices.append(line.split(":", 1)[1].strip())
-        return devices
-    except FileNotFoundError:
-        warn("hashcat not found. Install it: sudo pacman -S hashcat")
+    result = run_subprocess(["hashcat", "-I"], capture_output=True, text=True, timeout=15)
+    if result is None:
         sys.exit(1)
+    devices = []
+    for line in result.stdout.splitlines():
+        if "Name" in line and "..." in line:
+            devices.append(line.split(":", 1)[1].strip())
+    return devices
 
 
 # Every location this tool will scan looking for wordlists/rules, rather
@@ -179,19 +199,19 @@ def check_gpu():
 # folder, a security-work-specific ~/rt/wordlists folder, and a mounted
 # USB drive - the actual layout this tool was built against, but easy to
 # extend with more paths if your own setup differs.
-WORDLIST_SEARCH_PATHS = [
+WORDLIST_SEARCH_PATHS: List[Path] = [
     Path.home() / "wordlists",
     Path.home() / "rt" / "wordlists",
     Path("/mnt/usb-transfer"),
 ]
 
-RULE_SEARCH_PATHS = [
+RULE_SEARCH_PATHS: List[Path] = [
     Path("/usr/share/doc/hashcat/rules"),
     Path("/usr/share/john/rules"),
 ]
 
 
-def find_wordlists():
+def find_wordlists() -> List[Path]:
     """Scan all WORDLIST_SEARCH_PATHS for .txt files and symlinks to
     .txt files (the latter matters for e.g. ~/wordlists/priority.txt
     symlinked to a file that lives on a mounted USB drive). Dedupes by
@@ -211,7 +231,7 @@ def find_wordlists():
     return unique
 
 
-def find_rules():
+def find_rules() -> List[Path]:
     found = []
     for base in RULE_SEARCH_PATHS:
         if base.exists():
@@ -219,7 +239,7 @@ def find_rules():
     return found
 
 
-def prompt_choice(prompt, options, allow_none=True):
+def prompt_choice(prompt: str, options: List[Any], allow_none: bool = True) -> Optional[Any]:
     # every interactive menu in this tool goes through here, saves
     # rewriting the same input-validation loop five times
     if not options:
@@ -239,14 +259,14 @@ def prompt_choice(prompt, options, allow_none=True):
         print("Invalid choice, try again.")
 
 
-def log_cracked(hash_type, hash_value, plaintext):
+def log_cracked(hash_type: Any, hash_value: str, plaintext: str) -> None:
     # plaintext + append-only on purpose, don't need a db for this and
     # it's nice being able to just cat the file
     with open(CRACKED_LOG, "a") as f:
         f.write(f"{datetime.now().isoformat()} | {hash_type} | {hash_value} | {plaintext}\n")
 
 
-def check_path_exists(path_str, label):
+def check_path_exists(path_str: Optional[Any], label: str) -> bool:
     """Pre-flight check run before every hashcat invocation. Added after
     a real failure during testing: an unmounted USB drive left a broken
     symlink in place, and hashcat's own error ("No such file or directory")
@@ -273,7 +293,7 @@ def check_path_exists(path_str, label):
 # bug: a patch updated three of the four copies but silently missed one,
 # and it went unnoticed until a test caught it. One implementation now,
 # used everywhere - if it's wrong, it's wrong in exactly one place.
-def read_last_potfile_result(potfile):
+def read_last_potfile_result(potfile: Path) -> Tuple[Optional[str], Optional[str]]:
     """Read a potfile and return (hash, plaintext) for the LAST cracked
     entry, or (None, None) if nothing's there. 'Last', not 'any', matters
     when a session name gets reused and the potfile accumulates more than
@@ -290,7 +310,7 @@ def read_last_potfile_result(potfile):
     return h, plain
 
 
-def read_all_potfile_results(potfile):
+def read_all_potfile_results(potfile: Path) -> List[Tuple[str, str]]:
     """Same idea but returns every cracked (hash, plaintext) pair, not
     just the last one - used by multi-hash mode where a single hashcat
     run can crack several hashes in one potfile."""
@@ -307,7 +327,14 @@ def read_all_potfile_results(potfile):
     return results
 
 
-def run_hashcat(target_file, mode, wordlist, rule, session_name, debug_file=None):
+def run_hashcat(
+    target_file: Any,
+    mode: Any,
+    wordlist: str,
+    rule: Optional[str],
+    session_name: str,
+    debug_file: Optional[Path] = None,
+) -> Optional[str]:
     """Core dictionary-attack (-a 0) invocation. Every other attack mode
     (mask, combinator) has its own similar run_* function rather than
     trying to force every hashcat attack mode through one shared function -
@@ -339,7 +366,8 @@ def run_hashcat(target_file, mode, wordlist, rule, session_name, debug_file=None
     if DRY_RUN:
         info("(dry run - not actually executing)")
         return None
-    subprocess.run(cmd)
+    if run_subprocess(cmd) is None:
+        return None
 
     h, plain = read_last_potfile_result(potfile)
     if plain:
@@ -349,7 +377,15 @@ def run_hashcat(target_file, mode, wordlist, rule, session_name, debug_file=None
     return None
 
 
-def crack_single_hash(hash_value, mode, wordlist, rule, session_prefix, cfg, use_priority=True):
+def crack_single_hash(
+    hash_value: str,
+    mode: Any,
+    wordlist: str,
+    rule: Optional[str],
+    session_prefix: str,
+    cfg: Dict[str, Any],
+    use_priority: bool = True,
+) -> Optional[str]:
     """The actual entry point most single-hash cracks go through. Tries
     the small priority wordlist first (near-instant if the password is
     common), only falling through to the full wordlist + rules if that
@@ -371,7 +407,7 @@ def crack_single_hash(hash_value, mode, wordlist, rule, session_prefix, cfg, use
     return run_hashcat(hash_file, mode, wordlist, rule, session_prefix)
 
 
-def cmd_crack(args):
+def cmd_crack(args: argparse.Namespace) -> None:
     """Handles three distinct input modes in one command:
     1. --restore: resume a previously interrupted session (checked first,
        since none of the other hash/wordlist logic applies to a resume)
@@ -396,7 +432,8 @@ def cmd_crack(args):
             sys.exit(1)
         info(f"Resuming session: {args.restore}")
         cmd = ["hashcat", "--session", args.restore, "--restore"]
-        subprocess.run(cmd)
+        if run_subprocess(cmd) is None:
+            return
         potfile = CONFIG_DIR / f"{args.restore}.pot"
         h, plain = read_last_potfile_result(potfile)
         if plain:
@@ -466,7 +503,7 @@ def cmd_crack(args):
     crack_single_hash(hash_value, mode, wordlist, rule, session_name, cfg, use_priority=not args.no_priority)
 
 
-def cmd_batch(args):
+def cmd_batch(args: argparse.Namespace) -> None:
     """Crack every hash in a file, one at a time. Each hash gets its own
     hashcat session (batch_1, batch_2, ...) rather than combining them
     into a single hashcat run - simpler to reason about progress and
@@ -486,7 +523,7 @@ def cmd_batch(args):
         wordlist = str(prompt_choice("Select a wordlist:", find_wordlists(), allow_none=False))
     rule = args.rule or cfg.get("default_rule")
 
-    results = {}
+    results: Dict[str, Optional[str]] = {}
     for i, h in enumerate(hashes, 1):
         print(f"\n=== [{i}/{len(hashes)}] {h[:50]} ===")
         candidates = detect_hash_type(h)
@@ -502,12 +539,12 @@ def cmd_batch(args):
         info(f"\nResults exported to {args.json_out}")
 
 
-def cmd_benchmark(args):
+def cmd_benchmark(args: argparse.Namespace) -> None:
     # not reinventing hashcat's own benchmark, just passing through
-    subprocess.run(["hashcat", "-b"])
+    run_subprocess(["hashcat", "-b"])
 
 
-def cmd_list_wordlists(args):
+def cmd_list_wordlists(args: argparse.Namespace) -> None:
     for f in find_wordlists():
         size = f.stat().st_size if f.exists() else 0
         unit = f"{size / (1024**3):.2f} GB" if size > 10**8 else f"{size/1024:.1f} KB"
@@ -518,19 +555,19 @@ def cmd_list_wordlists(args):
         print(f"  {exists} {f}  ({unit})")
 
 
-def cmd_list_rules(args):
+def cmd_list_rules(args: argparse.Namespace) -> None:
     for r in find_rules():
         print(f"  {r}")
 
 
-def cmd_gpu(args):
+def cmd_gpu(args: argparse.Namespace) -> None:
     devices = check_gpu()
     print("[*] Detected devices:" if devices else "[!] No devices detected.")
     for d in devices:
         print(f"  - {d}")
 
 
-def cmd_formats(args):
+def cmd_formats(args: argparse.Namespace) -> None:
     # just a docs command, lists what we can auto-detect + the file-based stuff
     print("Supported hash formats (auto-detected from a pasted string):\n")
     for pattern, (mode, name, note) in HASH_PATTERNS:
@@ -542,7 +579,7 @@ def cmd_formats(args):
         print(f"           → {howto}")
 
 
-def cmd_sessions(args):
+def cmd_sessions(args: argparse.Namespace) -> None:
     # reads HASHCAT_SESSIONS_DIR not our own config dir - see the note
     # up top about hashcat ignoring --potfile-path for restore stuff
     if not HASHCAT_SESSIONS_DIR.exists():
@@ -558,7 +595,7 @@ def cmd_sessions(args):
         print(f"  {session_name}")
 
 
-def cmd_config(args):
+def cmd_config(args: argparse.Namespace) -> None:
     # persists defaults so I'm not picking the same wordlist every time
     cfg = load_config()
     if args.action == "show":
@@ -589,7 +626,7 @@ def cmd_config(args):
 # to dictionary attacks, not a replacement - hence being a separate
 # `mask` subcommand rather than folded into `crack`.
 # ?l lowercase  ?u uppercase  ?d digit  ?s special  ?a all
-COMMON_MASKS = {
+COMMON_MASKS: Dict[str, str] = {
     "4-digit PIN": "?d?d?d?d",
     "6-digit PIN": "?d?d?d?d?d?d",
     "8 lowercase letters": "?l?l?l?l?l?l?l?l",
@@ -601,7 +638,7 @@ COMMON_MASKS = {
 }
 
 
-def run_mask_attack(target_file, mode, mask, session_name):
+def run_mask_attack(target_file: Any, mode: Any, mask: str, session_name: str) -> Optional[str]:
     potfile = CONFIG_DIR / f"{session_name}.pot"
     cmd = ["hashcat", "-m", str(mode), "-a", "3", str(target_file), mask,
            "--session", session_name, "--potfile-path", str(potfile)]
@@ -609,7 +646,8 @@ def run_mask_attack(target_file, mode, mask, session_name):
     if DRY_RUN:
         info("(dry run - not actually executing)")
         return None
-    subprocess.run(cmd)
+    if run_subprocess(cmd) is None:
+        return None
     h, plain = read_last_potfile_result(potfile)
     if plain:
         ok(f"CRACKED: {plain}")
@@ -618,7 +656,7 @@ def run_mask_attack(target_file, mode, mask, session_name):
     return None
 
 
-def cmd_mask(args):
+def cmd_mask(args: argparse.Namespace) -> None:
     ensure_dirs()
     hash_value = args.hash or input("Enter the hash to crack: ").strip()
 
@@ -643,7 +681,7 @@ def cmd_mask(args):
     run_mask_attack(hash_file, mode, mask, session_name)
 
 
-def cmd_masks(args):
+def cmd_masks(args: argparse.Namespace) -> None:
     print("Built-in common masks (use with: hashwraith mask --mask '<pattern>'):\n")
     for name, pattern in COMMON_MASKS.items():
         print(f"  {pattern:<20} {name}")
@@ -656,13 +694,13 @@ def cmd_masks(args):
 # a wordlist's actual length/charset distribution tells you which
 # COMMON_MASKS entry is actually worth running against a similar target
 # population, instead of picking one blind.
-def analyze_wordlist(path, sample_size=500000):
+def analyze_wordlist(path: str, sample_size: int = 500000) -> Tuple[int, Dict[int, int], Dict[str, int]]:
     """Sample a wordlist and report length distribution + charset patterns.
     Sampling (not scanning the whole file) matters for multi-billion-line
     lists - a 500k sample is statistically representative and vastly
     faster than reading the entire file line by line."""
-    lengths = {}
-    charset_patterns = {}
+    lengths: Dict[int, int] = {}
+    charset_patterns: Dict[str, int] = {}
     count = 0
 
     with open(path, "r", errors="ignore") as f:
@@ -697,7 +735,7 @@ def analyze_wordlist(path, sample_size=500000):
     return count, lengths, charset_patterns
 
 
-def cmd_stats(args):
+def cmd_stats(args: argparse.Namespace) -> None:
     # sampling logic works fine but the pattern_names dict below is
     # incomplete - only covers the common combos, rare ones just print
     # the raw letter code. good enough for now
@@ -720,8 +758,11 @@ def cmd_stats(args):
     pattern_names = {
         "l": "lowercase only", "u": "uppercase only", "d": "digits only",
         "s": "special only", "lu": "mixed case", "ld": "lower+digit",
-        "lud": "lower+upper+digit", "lds": "lower+digit+special",
-        "luds": "lower+upper+digit+special",
+        "ls": "lower+special", "ud": "upper+digit", "us": "upper+special",
+        "ds": "digit+special", "lud": "lower+upper+digit",
+        "lus": "lower+upper+special", "lds": "lower+digit+special",
+        "uds": "upper+digit+special", "luds": "lower+upper+digit+special",
+        "?": "empty/unknown",
     }
     for pattern, n in sorted(patterns.items(), key=lambda x: -x[1])[:10]:
         pct = (n / count) * 100
@@ -747,7 +788,15 @@ def cmd_stats(args):
 # A third distinct attack surface alongside dictionary+rules and mask
 # attacks: useful specifically for compound patterns that neither of the
 # other two modes are well-suited to generate on their own.
-def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name, rule1=None, rule2=None):
+def run_combinator_attack(
+    target_file: Any,
+    mode: Any,
+    wordlist1: str,
+    wordlist2: str,
+    session_name: str,
+    rule1: Optional[str] = None,
+    rule2: Optional[str] = None,
+) -> Optional[str]:
     """rule1/rule2 map to hashcat's -j/-k flags - applies a rule to each
     side of the combination BEFORE combining, e.g. capitalize every word
     from list1 (-j) while appending digits to every word from list2 (-k)."""
@@ -762,7 +811,8 @@ def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name,
     if DRY_RUN:
         info("(dry run - not actually executing)")
         return None
-    subprocess.run(cmd)
+    if run_subprocess(cmd) is None:
+        return None
     h, plain = read_last_potfile_result(potfile)
     if plain:
         ok(f"CRACKED: {plain}")
@@ -771,7 +821,7 @@ def run_combinator_attack(target_file, mode, wordlist1, wordlist2, session_name,
     return None
 
 
-def cmd_combinator(args):
+def cmd_combinator(args: argparse.Namespace) -> None:
     ensure_dirs()
     hash_value = args.hash or input("Enter the hash to crack: ").strip()
 
@@ -805,7 +855,7 @@ def cmd_combinator(args):
 # existing attack functions rather than hardcoded hashcat calls - this is
 # genuinely "run everything reasonable and stop when it works" instead of
 # making the user pick a strategy up front.
-def cmd_auto(args):
+def cmd_auto(args: argparse.Namespace) -> None:
     """Try, in order: priority wordlist -> full wordlist (+rule if given)
     -> each COMMON_MASKS pattern. Stops at the first crack. Reports which
     stage succeeded so you know what actually worked."""
@@ -868,7 +918,14 @@ def cmd_auto(args):
 # they're the same type - loads the wordlist/rules ONCE and tests every
 # hash against every candidate together. If no --mode is given, hashes
 # get auto-detected and grouped by type, one hashcat pass per group.
-def _run_multibatch_group(hash_lines, mode, wordlist, rule, session_name, json_results):
+def _run_multibatch_group(
+    hash_lines: List[str],
+    mode: Any,
+    wordlist: str,
+    rule: Optional[str],
+    session_name: str,
+    json_results: Dict[str, str],
+) -> None:
     group_file = CONFIG_DIR / f"{session_name}_hashes.txt"
     group_file.write_text("\n".join(hash_lines) + "\n")
     potfile = CONFIG_DIR / f"{session_name}.pot"
@@ -880,7 +937,8 @@ def _run_multibatch_group(hash_lines, mode, wordlist, rule, session_name, json_r
     if DRY_RUN:
         info("(dry run - not actually executing)")
         return
-    subprocess.run(cmd)
+    if run_subprocess(cmd) is None:
+        return
 
     results = read_all_potfile_results(potfile)
     ok(f"Cracked {len(results)} of {len(hash_lines)} hash(es) in mode {mode}:")
@@ -892,7 +950,7 @@ def _run_multibatch_group(hash_lines, mode, wordlist, rule, session_name, json_r
         warn(f"No potfile produced for mode {mode} group - nothing cracked, or hashcat failed to run.")
 
 
-def cmd_multibatch(args):
+def cmd_multibatch(args: argparse.Namespace) -> None:
     ensure_dirs()
     cfg = load_config()
     if not check_path_exists(args.file, "Hash file"):
@@ -903,14 +961,14 @@ def cmd_multibatch(args):
     rule = args.rule or cfg.get("default_rule")
 
     all_hashes = [h.strip() for h in Path(args.file).read_text().splitlines() if h.strip()]
-    json_results = {}
+    json_results: Dict[str, str] = {}
 
     if args.mode is not None:
         session_name = args.session or f"multibatch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         _run_multibatch_group(all_hashes, args.mode, wordlist, rule, session_name, json_results)
     else:
         info("No --mode given, auto-detecting and grouping hashes by type...")
-        groups = {}
+        groups: Dict[int, List[str]] = {}
         skipped = []
         for h in all_hashes:
             candidates = detect_hash_type(h)
@@ -932,7 +990,7 @@ def cmd_multibatch(args):
 
 
 # ─── Cracked-hash history/search ────────────────────────────────────────
-def cmd_history(args):
+def cmd_history(args: argparse.Namespace) -> None:
     """Search/display the cracked-hash log. Supports filtering by a
     substring match against hash, plaintext, or mode - useful once
     cracked.log has accumulated hundreds of entries across sessions."""
@@ -963,7 +1021,6 @@ def cmd_history(args):
     print(f"\n{len(lines)} entr{'y' if len(lines) == 1 else 'ies'} shown.")
 
 
-
 # ─── Hybrid attacks (-a 6 / -a 7) ────────────────────────────────────────
 # Bridges dictionary and mask attacks: append (-a 6) or prepend (-a 7) a
 # brute-force mask to every word in a wordlist. Catches patterns like
@@ -971,7 +1028,14 @@ def cmd_history(args):
 # wordlist the way combinator does - the mask covers the whole space
 # procedurally. Genuinely a third distinct attack surface, not a
 # reshuffling of combinator/mask.
-def run_hybrid_attack(target_file, mode, wordlist, mask, direction, session_name):
+def run_hybrid_attack(
+    target_file: Any,
+    mode: Any,
+    wordlist: str,
+    mask: str,
+    direction: int,
+    session_name: str,
+) -> Optional[str]:
     """direction: 6 = wordlist+mask (append), 7 = mask+wordlist (prepend)"""
     potfile = CONFIG_DIR / f"{session_name}.pot"
     if direction == 6:
@@ -984,7 +1048,8 @@ def run_hybrid_attack(target_file, mode, wordlist, mask, direction, session_name
     if DRY_RUN:
         info("(dry run - not actually executing)")
         return None
-    subprocess.run(cmd)
+    if run_subprocess(cmd) is None:
+        return None
     h, plain = read_last_potfile_result(potfile)
     if plain:
         ok(f"CRACKED: {plain}")
@@ -993,7 +1058,7 @@ def run_hybrid_attack(target_file, mode, wordlist, mask, direction, session_name
     return None
 
 
-def cmd_hybrid(args):
+def cmd_hybrid(args: argparse.Namespace) -> None:
     ensure_dirs()
     cfg = load_config()
     hash_value = args.hash or input("Enter the hash to crack: ").strip()
@@ -1025,23 +1090,24 @@ def cmd_hybrid(args):
     run_hybrid_attack(hash_file, mode, wordlist, mask, direction, session_name)
 
 
-
 # ─── --show integration ─────────────────────────────────────────────────
 # hashcat can recall already-cracked results from a potfile WITHOUT
 # re-running the attack, via --show. Useful for "have I already cracked
 # this hash?" - either checking one specific potfile by session name, or
 # scanning every potfile in ~/.hashwraith/ for a match.
-def cmd_show(args):
+def cmd_show(args: argparse.Namespace) -> None:
     ensure_dirs()
 
     if args.session:
         potfile = CONFIG_DIR / f"{args.session}.pot"
         if not check_path_exists(potfile, "Potfile"):
             return
-        result = subprocess.run(
+        result = run_subprocess(
             ["hashcat", "-m", str(args.mode), "--show", str(potfile)],
             capture_output=True, text=True
         )
+        if result is None:
+            return
         if result.stdout.strip():
             print(result.stdout.strip())
         else:
@@ -1075,7 +1141,7 @@ def cmd_show(args):
 # in a ruleset actually contribute vs which never fire for a given
 # wordlist+hash combo - useful for trimming down a huge ruleset to just
 # the parts that matter for your actual targets.
-def cmd_rules_report(args):
+def cmd_rules_report(args: argparse.Namespace) -> None:
     ensure_dirs()
     hash_value = args.hash or input("Enter the hash to crack: ").strip()
 
@@ -1129,7 +1195,10 @@ def cmd_rules_report(args):
         print("\nLogged matches (original:rule:result):")
         for line in lines[:args.show_all]:
             print(f"  {line}")
-def cmd_merge(args):
+
+
+# ─── Wordlist merge/dedupe ──────────────────────────────────────────────
+def cmd_merge(args: argparse.Namespace) -> None:
     """Merges/dedupes wordlists via the system sort -u rather than
     reimplementing dedup in Python - for multi-GB wordlists, GNU sort's
     external merge sort is vastly more memory-efficient. -S caps sort's
@@ -1151,7 +1220,9 @@ def cmd_merge(args):
         info("(dry run - not actually executing)")
         return
 
-    result = subprocess.run(cmd)
+    result = run_subprocess(cmd)
+    if result is None:
+        return
     if result.returncode != 0:
         err(f"sort exited with code {result.returncode} - check disk space and paths above.")
         return
@@ -1164,8 +1235,7 @@ def cmd_merge(args):
         ok(f"Merged into {args.output}: {line_count:,} unique lines, {unit}")
 
 
-
-def main():
+def main() -> None:
     """CLI entry point. Every subcommand mirrors a distinct hashcat attack
     mode or a piece of tool-management functionality - see each cmd_*
     function above for the reasoning behind that specific command."""
@@ -1290,7 +1360,7 @@ def main():
     args.func(args)
 
 
-def cli():
+def cli() -> None:
     """Entry point wrapper - catches Ctrl+C cleanly instead of dumping a
     raw traceback. A long mask/wordlist attack can run for minutes, and
     interrupting it shouldn't look like the tool crashed."""
